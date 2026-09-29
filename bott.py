@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import logging
@@ -25,12 +24,12 @@ from telegram.ext import (
 
 BOT_TOKEN = os.getenv("8725108807:AAEVt9e3-VrMzBbtGlR7GQ0QyoeZpJnydUY")
 
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN environment variable topilmadi.")
+
 ADMIN_ID = 6383248812
 
-# Kanal topshirig'i mukofoti
 DEFAULT_TASK_REWARD = 2
-
-# Referal mukofoti
 REFERRAL_REWARD = 4
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -55,7 +54,6 @@ def init_db():
     conn = get_db()
     cur = conn.cursor()
 
-    # USERS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -64,11 +62,11 @@ def init_db():
             balance INTEGER DEFAULT 0,
             referred_by INTEGER,
             referrals INTEGER DEFAULT 0,
-            created_at TEXT
+            created_at TEXT,
+            last_active_at TEXT
         )
     """)
 
-    # COMPLETED TASKS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS completed_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,7 +77,6 @@ def init_db():
         )
     """)
 
-    # GIFT REQUESTS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gift_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,7 +89,6 @@ def init_db():
         )
     """)
 
-    # CHANNELS
     cur.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -103,8 +99,8 @@ def init_db():
         )
     """)
 
-    # Eski bazalarda yetishmayotgan ustunlarni qo'shish
-    tables_columns = {
+    # Eski database uchun migration
+    migrations = {
         "users": {
             "username": "TEXT",
             "first_name": "TEXT",
@@ -112,15 +108,14 @@ def init_db():
             "referred_by": "INTEGER",
             "referrals": "INTEGER DEFAULT 0",
             "created_at": "TEXT",
+            "last_active_at": "TEXT",
         },
         "completed_tasks": {
-            "id": "INTEGER",
             "user_id": "INTEGER",
             "task_id": "TEXT",
             "completed_at": "TEXT",
         },
         "gift_requests": {
-            "id": "INTEGER",
             "user_id": "INTEGER",
             "price": "INTEGER",
             "status": "TEXT DEFAULT 'pending'",
@@ -129,7 +124,6 @@ def init_db():
             "gift_name": "TEXT",
         },
         "channels": {
-            "id": "INTEGER",
             "channel_id": "TEXT",
             "title": "TEXT",
             "reward": "INTEGER DEFAULT 15",
@@ -137,7 +131,7 @@ def init_db():
         },
     }
 
-    for table, columns in tables_columns.items():
+    for table, columns in migrations.items():
         cur.execute(f"PRAGMA table_info({table})")
         existing = {row["name"] for row in cur.fetchall()}
 
@@ -150,7 +144,7 @@ def init_db():
                 except Exception:
                     pass
 
-    # Agar yangi baza bo'lsa, boshlang'ich kanallarni qo'shish
+    # Default kanallar
     cur.execute("SELECT COUNT(*) AS count FROM channels")
     channel_count = cur.fetchone()["count"]
 
@@ -186,7 +180,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-    print("✅ Database tekshirildi va yangilandi.")
+    print("✅ Database tayyor.")
 
 
 # =========================================================
@@ -196,6 +190,8 @@ def init_db():
 def add_user(user):
     conn = get_db()
     cur = conn.cursor()
+
+    now = datetime.now().isoformat()
 
     cur.execute(
         "SELECT user_id FROM users WHERE user_id = ?",
@@ -208,26 +204,39 @@ def add_user(user):
         cur.execute(
             """
             INSERT INTO users
-            (user_id, username, first_name, balance, referrals, created_at)
-            VALUES (?, ?, ?, 0, 0, ?)
+            (
+                user_id,
+                username,
+                first_name,
+                balance,
+                referrals,
+                created_at,
+                last_active_at
+            )
+            VALUES (?, ?, ?, 0, 0, ?, ?)
             """,
             (
                 user.id,
                 user.username or "",
                 user.first_name or "",
-                datetime.now().isoformat(),
+                now,
+                now,
             ),
         )
     else:
         cur.execute(
             """
             UPDATE users
-            SET username = ?, first_name = ?
+            SET
+                username = ?,
+                first_name = ?,
+                last_active_at = ?
             WHERE user_id = ?
             """,
             (
                 user.username or "",
                 user.first_name or "",
+                now,
                 user.id,
             ),
         )
@@ -265,6 +274,7 @@ def main_menu(user_id):
 
     if user_id == ADMIN_ID:
         buttons.append(["🎁 So‘rovlar", "⭐ Bot Stars"])
+        buttons.append(["📊 Bot statistikasi"])
         buttons.append(["📢 Kanallar"])
 
     return ReplyKeyboardMarkup(
@@ -308,33 +318,47 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
                     cur.execute(
                         """
-                        UPDATE users
-                        SET referred_by = ?
+                        SELECT user_id
+                        FROM users
                         WHERE user_id = ?
                         """,
-                        (ref_id, user.id),
+                        (ref_id,),
                     )
 
-                    cur.execute(
-                        """
-                        UPDATE users
-                        SET balance = balance + ?,
-                            referrals = referrals + 1
-                        WHERE user_id = ?
-                        """,
-                        (REFERRAL_REWARD, ref_id),
-                    )
+                    ref_exists = cur.fetchone()
 
-                    conn.commit()
+                    if ref_exists:
 
-                    try:
-                        await context.bot.send_message(
-                            ref_id,
-                            f"🎉 Sizga yangi referal qo‘shildi!\n"
-                            f"⭐ +{REFERRAL_REWARD} Stars",
+                        cur.execute(
+                            """
+                            UPDATE users
+                            SET referred_by = ?
+                            WHERE user_id = ?
+                            """,
+                            (ref_id, user.id),
                         )
-                    except Exception:
-                        pass
+
+                        cur.execute(
+                            """
+                            UPDATE users
+                            SET
+                                balance = balance + ?,
+                                referrals = referrals + 1
+                            WHERE user_id = ?
+                            """,
+                            (REFERRAL_REWARD, ref_id),
+                        )
+
+                        conn.commit()
+
+                        try:
+                            await context.bot.send_message(
+                                ref_id,
+                                f"🎉 Sizga yangi referal qo‘shildi!\n"
+                                f"⭐ +{REFERRAL_REWARD} Stars",
+                            )
+                        except Exception:
+                            pass
 
                 conn.close()
 
@@ -475,18 +499,14 @@ async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     completed = cur.fetchone()
+    conn.close()
 
     if completed:
-        conn.close()
-
         await query.edit_message_text(
             "✅ Bu topshiriqni avval bajargansiz."
         )
         return
 
-    conn.close()
-
-    # Kanalga o'tish
     keyboard = [
         [
             InlineKeyboardButton(
@@ -574,9 +594,7 @@ async def check_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             user_id=user_id,
         )
 
-        status = member.status
-
-        is_member = status in [
+        is_member = member.status in [
             "member",
             "administrator",
             "creator",
@@ -621,7 +639,6 @@ async def check_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         return
 
-    # Mukofot berish
     try:
 
         cur.execute(
@@ -715,7 +732,7 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# STATISTIKA
+# USER STATISTIKA
 # =========================================================
 
 async def statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -778,7 +795,7 @@ async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# GIFT LIST
+# REAL GIFTS
 # =========================================================
 
 async def get_real_gifts(bot):
@@ -796,7 +813,6 @@ async def get_real_gifts(bot):
                 continue
 
             gift_id = str(gift.id)
-
             emoji = "🎁"
 
             try:
@@ -816,7 +832,6 @@ async def get_real_gifts(bot):
         return result
 
     except Exception as e:
-
         print("Gift list error:", e)
         return []
 
@@ -953,13 +968,11 @@ async def confirm_gift_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     gift_name = parts[3]
-
     user_id = query.from_user.id
 
     conn = get_db()
     cur = conn.cursor()
 
-    # Starsni atomik tarzda ushlab qolish
     cur.execute(
         """
         UPDATE users
@@ -967,11 +980,7 @@ async def confirm_gift_callback(update: Update, context: ContextTypes.DEFAULT_TY
         WHERE user_id = ?
         AND balance >= ?
         """,
-        (
-            price,
-            user_id,
-            price,
-        ),
+        (price, user_id, price),
     )
 
     if cur.rowcount == 0:
@@ -1012,7 +1021,6 @@ async def confirm_gift_callback(update: Update, context: ContextTypes.DEFAULT_TY
         f"⏳ Admin so‘rovni ko‘rib chiqadi."
     )
 
-    # Adminga yuborish
     try:
 
         username = (
@@ -1151,7 +1159,10 @@ async def request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Siz admin emassiz.", show_alert=True)
+        await query.answer(
+            "❌ Siz admin emassiz.",
+            show_alert=True,
+        )
         return
 
     await query.answer()
@@ -1189,10 +1200,7 @@ async def request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = request["user_id"]
     price = request["price"]
 
-    # -----------------------------------------------------
-    # TASDIQLASH
-    # -----------------------------------------------------
-
+    # APPROVE
     if action == "approve":
 
         cur.execute(
@@ -1247,16 +1255,13 @@ async def request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🎁 Gift: {request['gift_name']}\n"
             f"👤 User ID: {user_id}\n"
             f"⭐ {price} Stars\n\n"
-            f"⚠️ Endi Giftni Telegram orqali foydalanuvchiga "
-            f"qo‘lda yuboring.\n\n"
+            f"⚠️ Endi Giftni Telegram orqali "
+            f"foydalanuvchiga qo‘lda yuboring.\n\n"
             f"Yuborganingizdan keyin «🎁 Berildi» tugmasini bosing.",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
 
-    # -----------------------------------------------------
-    # PENDING RAD ETISH
-    # -----------------------------------------------------
-
+    # REJECT
     elif action == "reject":
 
         cur.execute(
@@ -1305,10 +1310,7 @@ async def request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⭐ {price} Stars foydalanuvchiga qaytarildi."
         )
 
-    # -----------------------------------------------------
-    # GIFT BERILDI
-    # -----------------------------------------------------
-
+    # DELIVERED
     elif action == "delivered":
 
         cur.execute(
@@ -1349,10 +1351,7 @@ async def request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Gift foydalanuvchiga berildi."
         )
 
-    # -----------------------------------------------------
-    # TASDIQLANGAN SO‘ROVNI RAD ETISH
-    # -----------------------------------------------------
-
+    # REJECT APPROVED
     elif action == "rejectapproved":
 
         cur.execute(
@@ -1422,6 +1421,248 @@ async def bot_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+# ADMIN STATISTIKA
+# =========================================================
+
+async def admin_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    conn = get_db()
+    cur = conn.cursor()
+
+    # JAMI FOYDALANUVCHILAR
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE user_id != ?
+        """,
+        (ADMIN_ID,),
+    )
+    total_users = cur.fetchone()["count"]
+
+    # BUGUN QO'SHILGAN
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE user_id != ?
+        AND date(created_at) = date('now', 'localtime')
+        """,
+        (ADMIN_ID,),
+    )
+    today_users = cur.fetchone()["count"]
+
+    # 7 KUNDA QO'SHILGAN
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE user_id != ?
+        AND datetime(created_at) >= datetime('now', '-7 days')
+        """,
+        (ADMIN_ID,),
+    )
+    week_users = cur.fetchone()["count"]
+
+    # 30 KUNDA QO'SHILGAN
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE user_id != ?
+        AND datetime(created_at) >= datetime('now', '-30 days')
+        """,
+        (ADMIN_ID,),
+    )
+    month_users = cur.fetchone()["count"]
+
+    # BUGUN FAOL
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE user_id != ?
+        AND datetime(last_active_at) >=
+            datetime('now', 'localtime', 'start of day')
+        """,
+        (ADMIN_ID,),
+    )
+    active_today = cur.fetchone()["count"]
+
+    # 7 KUNDA FAOL
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM users
+        WHERE user_id != ?
+        AND datetime(last_active_at) >= datetime('now', '-7 days')
+        """,
+        (ADMIN_ID,),
+    )
+    active_week = cur.fetchone()["count"]
+
+    # JAMI STARS
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(balance), 0) AS total
+        FROM users
+        WHERE user_id != ?
+        """,
+        (ADMIN_ID,),
+    )
+    total_stars = cur.fetchone()["total"]
+
+    # BAJARILGAN TOPSHIRIQLAR
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM completed_tasks
+        """
+    )
+    completed_tasks = cur.fetchone()["count"]
+
+    # REFERALLAR
+    cur.execute(
+        """
+        SELECT COALESCE(SUM(referrals), 0) AS total
+        FROM users
+        WHERE user_id != ?
+        """,
+        (ADMIN_ID,),
+    )
+    total_referrals = cur.fetchone()["total"]
+
+    # GIFT JAMI
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM gift_requests
+        """
+    )
+    total_gifts = cur.fetchone()["count"]
+
+    # PENDING
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM gift_requests
+        WHERE status = 'pending'
+        """
+    )
+    pending_gifts = cur.fetchone()["count"]
+
+    # APPROVED
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM gift_requests
+        WHERE status = 'approved'
+        """
+    )
+    approved_gifts = cur.fetchone()["count"]
+
+    # DELIVERED
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM gift_requests
+        WHERE status = 'delivered'
+        """
+    )
+    delivered_gifts = cur.fetchone()["count"]
+
+    # REJECTED
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM gift_requests
+        WHERE status = 'rejected'
+        """
+    )
+    rejected_gifts = cur.fetchone()["count"]
+
+    # KANALLAR
+    cur.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM channels
+        """
+    )
+    channel_count = cur.fetchone()["count"]
+
+    # TOP REFERALLAR
+    cur.execute(
+        """
+        SELECT user_id, username, first_name, referrals
+        FROM users
+        WHERE user_id != ?
+        ORDER BY referrals DESC
+        LIMIT 5
+        """,
+        (ADMIN_ID,),
+    )
+
+    top_referrals = cur.fetchall()
+
+    conn.close()
+
+    text = (
+        "📊 FROSTSTARS BOT STATISTIKASI\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+
+        "👥 FOYDALANUVCHILAR\n"
+        f"• Jami: {total_users}\n"
+        f"• Bugun qo‘shilgan: {today_users}\n"
+        f"• 7 kunda qo‘shilgan: {week_users}\n"
+        f"• 30 kunda qo‘shilgan: {month_users}\n\n"
+
+        "🟢 FAOLLIGI\n"
+        f"• Bugun faol: {active_today}\n"
+        f"• 7 kunda faol: {active_week}\n\n"
+
+        "⭐ STARS\n"
+        f"• Balanslardagi jami: {total_stars} ⭐\n\n"
+
+        "📋 TOPSHIRIQLAR\n"
+        f"• Bajarilgan: {completed_tasks}\n"
+        f"• Kanallar: {channel_count}\n\n"
+
+        "👥 REFERALLAR\n"
+        f"• Jami referallar: {total_referrals}\n\n"
+
+        "🎁 GIFT SO‘ROVLARI\n"
+        f"• Jami: {total_gifts}\n"
+        f"• ⏳ Kutilmoqda: {pending_gifts}\n"
+        f"• ✅ Tasdiqlangan: {approved_gifts}\n"
+        f"• 🎁 Berilgan: {delivered_gifts}\n"
+        f"• ❌ Rad etilgan: {rejected_gifts}\n"
+    )
+
+    if top_referrals:
+        text += "\n🏆 TOP 5 REFERALLAR\n"
+
+        for i, user in enumerate(top_referrals, 1):
+
+            name = user["first_name"] or "Noma'lum"
+
+            username = (
+                f"@{user['username']}"
+                if user["username"]
+                else "username yo‘q"
+            )
+
+            text += (
+                f"{i}. {name} ({username}) — "
+                f"{user['referrals']} ta\n"
+            )
+
+    await update.message.reply_text(text)
+
+
+# =========================================================
 # ADMIN CHANNEL MENU
 # =========================================================
 
@@ -1450,14 +1691,13 @@ async def channel_admin_menu(
 
     await update.message.reply_text(
         "📢 Kanal boshqaruvi\n\n"
-        "Bu yerda kanallarni Telegramning o‘zidan "
-        "qo‘shishingiz va boshqarishingiz mumkin.",
+        "Bu yerda kanallarni qo‘shishingiz va boshqarishingiz mumkin.",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 # =========================================================
-# CHANNEL LIST
+# CHANNEL CALLBACK
 # =========================================================
 
 async def channel_admin_callback(
@@ -1468,7 +1708,10 @@ async def channel_admin_callback(
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
+        await query.answer(
+            "❌ Adminlar uchun.",
+            show_alert=True,
+        )
         return
 
     await query.answer()
@@ -1571,10 +1814,7 @@ async def channel_admin_text(
 
     text = update.message.text.strip()
 
-    # -----------------------------------------------------
-    # 1. CHANNEL USERNAME
-    # -----------------------------------------------------
-
+    # CHANNEL ID
     if step == "channel_id":
 
         if not text.startswith("@"):
@@ -1598,7 +1838,6 @@ async def channel_admin_text(
         )
 
         exists = cur.fetchone()
-
         conn.close()
 
         if exists:
@@ -1608,7 +1847,6 @@ async def channel_admin_text(
             )
             return
 
-        # Kanalni tekshirish
         try:
 
             chat = await context.bot.get_chat(text)
@@ -1632,7 +1870,6 @@ async def channel_admin_text(
             return
 
         context.user_data["new_channel_id"] = text
-
         context.user_data["channel_add_step"] = "title"
 
         await update.message.reply_text(
@@ -1644,14 +1881,10 @@ async def channel_admin_text(
 
         return
 
-    # -----------------------------------------------------
-    # 2. TITLE
-    # -----------------------------------------------------
-
+    # TITLE
     if step == "title":
 
         context.user_data["new_channel_title"] = text
-
         context.user_data["channel_add_step"] = "reward"
 
         await update.message.reply_text(
@@ -1662,10 +1895,7 @@ async def channel_admin_text(
 
         return
 
-    # -----------------------------------------------------
-    # 3. REWARD
-    # -----------------------------------------------------
-
+    # REWARD
     if step == "reward":
 
         try:
@@ -1733,8 +1963,6 @@ async def channel_admin_text(
             f"⚠️ Endi botni shu kanalga ADMIN qilib qo‘ying."
         )
 
-        return
-
 
 # =========================================================
 # EDIT CHANNEL
@@ -1748,7 +1976,10 @@ async def edit_channel_callback(
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
+        await query.answer(
+            "❌ Adminlar uchun.",
+            show_alert=True,
+        )
         return
 
     await query.answer()
@@ -1812,7 +2043,10 @@ async def edit_reward_callback(
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
+        await query.answer(
+            "❌ Adminlar uchun.",
+            show_alert=True,
+        )
         return
 
     await query.answer()
@@ -1839,7 +2073,10 @@ async def delete_channel_callback(
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
+        await query.answer(
+            "❌ Adminlar uchun.",
+            show_alert=True,
+        )
         return
 
     await query.answer()
@@ -1859,10 +2096,9 @@ async def delete_channel_callback(
     )
 
     channel = cur.fetchone()
+    conn.close()
 
     if not channel:
-
-        conn.close()
 
         await query.edit_message_text(
             "❌ Kanal topilmadi."
@@ -1881,8 +2117,6 @@ async def delete_channel_callback(
             ),
         ]
     ]
-
-    conn.close()
 
     await query.edit_message_text(
         f"⚠️ Shu kanalni o‘chirmoqchimisiz?\n\n"
@@ -1904,7 +2138,10 @@ async def confirm_delete_callback(
     query = update.callback_query
 
     if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
+        await query.answer(
+            "❌ Adminlar uchun.",
+            show_alert=True,
+        )
         return
 
     await query.answer()
@@ -1973,10 +2210,7 @@ async def edit_reward_text(
         SET reward = ?
         WHERE id = ?
         """,
-        (
-            reward,
-            channel_id,
-        ),
+        (reward, channel_id),
     )
 
     conn.commit()
@@ -1991,7 +2225,7 @@ async def edit_reward_text(
 
 
 # =========================================================
-# UNKNOWN / TEXT ROUTER
+# TEXT ROUTER
 # =========================================================
 
 async def text_router(
@@ -1999,14 +2233,17 @@ async def text_router(
     context: ContextTypes.DEFAULT_TYPE
 ):
 
-    if update.effective_user.id == ADMIN_ID:
+    user = update.effective_user
 
-        # Mukofotni o'zgartirish
+    # Faollikni yangilash
+    add_user(user)
+
+    if user.id == ADMIN_ID:
+
         if context.user_data.get("edit_reward_channel"):
             await edit_reward_text(update, context)
             return
 
-        # Yangi kanal qo'shish
         if context.user_data.get("channel_add_step"):
             await channel_admin_text(update, context)
             return
@@ -2034,6 +2271,9 @@ async def text_router(
     elif text == "⭐ Bot Stars":
         await bot_stars(update, context)
 
+    elif text == "📊 Bot statistikasi":
+        await admin_statistics(update, context)
+
     elif text == "📢 Kanallar":
         await channel_admin_menu(update, context)
 
@@ -2052,12 +2292,12 @@ def main():
         .build()
     )
 
-    # Commands
+    # START
     application.add_handler(
         CommandHandler("start", start)
     )
 
-    # Task
+    # TASK
     application.add_handler(
         CallbackQueryHandler(
             task_callback,
@@ -2072,7 +2312,7 @@ def main():
         )
     )
 
-    # Gifts
+    # GIFTS
     application.add_handler(
         CallbackQueryHandler(
             real_gift_callback,
@@ -2094,7 +2334,7 @@ def main():
         )
     )
 
-    # Gift requests
+    # GIFT REQUESTS
     application.add_handler(
         CallbackQueryHandler(
             request_callback,
@@ -2102,7 +2342,7 @@ def main():
         )
     )
 
-    # Channel management
+    # CHANNEL MANAGEMENT
     application.add_handler(
         CallbackQueryHandler(
             channel_admin_callback,
@@ -2138,7 +2378,7 @@ def main():
         )
     )
 
-    # Text
+    # TEXT
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
