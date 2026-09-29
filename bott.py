@@ -29,8 +29,8 @@ if not BOT_TOKEN:
 
 ADMIN_ID = 6383248812
 
-DEFAULT_TASK_REWARD = 2
-REFERRAL_REWARD = 4
+DEFAULT_TASK_REWARD = 1
+REFERRAL_REWARD = 2.5
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "starbot.db")
