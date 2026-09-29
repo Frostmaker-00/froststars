@@ -1,0 +1,1 @@
+print("FrostStars bot ishga tushdi!")
