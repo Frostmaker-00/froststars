@@ -28,10 +28,10 @@ BOT_TOKEN = os.getenv("8725108807:AAEVt9e3-VrMzBbtGlR7GQ0QyoeZpJnydUY")
 ADMIN_ID = 6383248812
 
 # Kanal topshirig'i mukofoti
-DEFAULT_TASK_REWARD = 2
+DEFAULT_TASK_REWARD = 0.5
 
 # Referal mukofoti
-REFERRAL_REWARD = 4
+REFERRAL_REWARD = 2
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "starbot.db")
