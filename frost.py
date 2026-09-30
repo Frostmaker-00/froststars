@@ -23,7 +23,7 @@ from telegram.ext import (
 # SOZLAMALAR
 # =========================================================
 
-BOT_TOKEN = "8725108807:AAGZWDsUXrFhUlH9i6OTtyHQEcmMU4E-Dg4"
+BOT_TOKEN = "8725108807:AAHuhC7KoGZVN43ChabuPMAx0qOLGnB--9I"
 
 ADMIN_ID = 6383248812
 
