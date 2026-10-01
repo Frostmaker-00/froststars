@@ -84,6 +84,73 @@ def init_db():
     """)
 
     # =====================================================
+    # USERS MIGRATION
+    # =====================================================
+    # Eski starbot.db uchun.
+    # Yetishmayotgan ustunlarni avtomatik qo'shadi.
+
+    cur.execute("PRAGMA table_info(users)")
+
+    existing_user_columns = {
+        row["name"]
+        for row in cur.fetchall()
+    }
+
+    if "referral_count" not in existing_user_columns:
+        try:
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN referral_count INTEGER DEFAULT 0
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    if "referred_by" not in existing_user_columns:
+        try:
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN referred_by INTEGER DEFAULT NULL
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    if "username" not in existing_user_columns:
+        try:
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN username TEXT DEFAULT ''
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    if "first_name" not in existing_user_columns:
+        try:
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN first_name TEXT DEFAULT ''
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    if "balance" not in existing_user_columns:
+        try:
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN balance REAL DEFAULT 0
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    if "created_at" not in existing_user_columns:
+        try:
+            cur.execute("""
+                ALTER TABLE users
+                ADD COLUMN created_at TEXT
+            """)
+        except sqlite3.OperationalError:
+            pass
+
+    # =====================================================
     # COMPLETED TASKS
     # =====================================================
 
@@ -332,6 +399,8 @@ def init_db():
 
     conn.commit()
     conn.close()
+
+    logger.info("Database initialized successfully.")
 
 
 # =========================================================
@@ -657,11 +726,12 @@ async def mandatory_message(update, context):
         )
     ])
 
-    await update.message.reply_text(
-        "🔐 Botdan foydalanish uchun quyidagi "
-        "kanallarga obuna bo‘lishingiz kerak:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    if update.message:
+        await update.message.reply_text(
+            "🔐 Botdan foydalanish uchun quyidagi "
+            "kanallarga obuna bo‘lishingiz kerak:",
+            reply_markup=InlineKeyboardMarkup(buttons)
+        )
 
 
 # =========================================================
@@ -958,6 +1028,10 @@ async def referral(update, context):
     user = update.effective_user
     row = get_user(user.id)
 
+    if not row:
+        add_user(user)
+        row = get_user(user.id)
+
     bot = await context.bot.get_me()
 
     link = (
@@ -980,6 +1054,10 @@ async def referral(update, context):
 async def statistics(update, context):
     user = update.effective_user
     row = get_user(user.id)
+
+    if not row:
+        add_user(user)
+        row = get_user(user.id)
 
     await update.message.reply_text(
         "📊 Statistikangiz\n\n"
@@ -1092,6 +1170,12 @@ async def confirm_gift(update, context):
 
     user_id = query.from_user.id
     row = get_user(user_id)
+
+    if not row:
+        await query.message.reply_text(
+            "❌ Foydalanuvchi topilmadi."
+        )
+        return
 
     if row["balance"] < price:
         await query.message.reply_text(
@@ -2327,6 +2411,12 @@ async def callback_handler(update, context):
 
         row = get_user(user_id)
 
+        if not row:
+            await query.message.reply_text(
+                "❌ Foydalanuvchi topilmadi."
+            )
+            return
+
         await query.message.reply_text(
             "⭐ Sizning balansingiz:\n\n"
             f"⭐ {row['balance']:.2f}"
@@ -2413,7 +2503,6 @@ async def error_handler(update, context):
 
 def main():
 
-    # Database
     init_db()
 
     logger.info(
