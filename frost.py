@@ -1,8 +1,8 @@
-
 import os
 import sqlite3
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from telegram import (
     Update,
@@ -19,67 +19,110 @@ from telegram.ext import (
     filters,
 )
 
-# =========================================================
+# ============================================================
 # SOZLAMALAR
-# =========================================================
+# ============================================================
 
-BOT_TOKEN = "8725108807:AAHuhC7KoGZVN43ChabuPMAx0qOLGnB--9I"
+BASE_DIR = Path(__file__).resolve().parent
+DB_PATH = BASE_DIR / "starbot.db"
+TOKEN_FILE = BASE_DIR / "bot_token.txt"
 
-ADMIN_ID = 6383248812
+# Botning asosiy egasi
+OWNER_ID = 6383248812
 
-# Kanal topshirig'i mukofoti
 DEFAULT_TASK_REWARD = 0.1
-
-# Referal mukofoti
 REFERRAL_REWARD = 1.5
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(BASE_DIR, "starbot.db")
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-# =========================================================
-# DATABASE
-# =========================================================
+logger = logging.getLogger(__name__)
 
-def get_db():
+
+# ============================================================
+# TOKEN
+# ============================================================
+
+def get_bot_token():
+    """
+    Token birinchi ishga tushganda so'raladi.
+    Keyingi ishga tushirishlarda bot_token.txt dan olinadi.
+    """
+
+    if TOKEN_FILE.exists():
+        token = TOKEN_FILE.read_text(encoding="utf-8").strip()
+
+        if token:
+            return token
+
+    print()
+    print("=" * 50)
+    print("FROSTSTARS BOT")
+    print("=" * 50)
+    print("Bot tokeni birinchi marta kiritiladi.")
+    print("Tokenni menga yubormang.")
+    print()
+
+    token = input("BotFather tokenini kiriting: ").strip()
+
+    if not token:
+        raise RuntimeError("BOT_TOKEN kiritilmadi!")
+
+    TOKEN_FILE.write_text(token, encoding="utf-8")
+
+    print()
+    print("Token saqlandi.")
+    print("Keyingi safar qayta kiritish shart emas.")
+    print()
+
+    return token
+
+
+BOT_TOKEN = get_bot_token()
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+def db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def init_db():
-    conn = get_db()
+
+    conn = db()
     cur = conn.cursor()
 
-    # USERS
+    # Users
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
             username TEXT,
             first_name TEXT,
-            balance INTEGER DEFAULT 0,
+            balance REAL DEFAULT 0,
             referred_by INTEGER,
             referrals INTEGER DEFAULT 0,
             created_at TEXT
         )
     """)
 
-    # COMPLETED TASKS
+    # Completed tasks
     cur.execute("""
         CREATE TABLE IF NOT EXISTS completed_tasks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
-            task_id TEXT,
+            task_id INTEGER,
             completed_at TEXT,
             UNIQUE(user_id, task_id)
         )
     """)
 
-    # GIFT REQUESTS
+    # Gift requests
     cur.execute("""
         CREATE TABLE IF NOT EXISTS gift_requests (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -92,812 +135,862 @@ def init_db():
         )
     """)
 
-    # CHANNELS
+    # Task channels
     cur.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             channel_id TEXT UNIQUE,
             title TEXT,
-            reward INTEGER DEFAULT 15,
+            reward REAL DEFAULT 0.1,
             created_at TEXT
         )
     """)
 
-    # Eski bazalarda yetishmayotgan ustunlarni qo'shish
-    tables_columns = {
-        "users": {
-            "username": "TEXT",
-            "first_name": "TEXT",
-            "balance": "INTEGER DEFAULT 0",
-            "referred_by": "INTEGER",
-            "referrals": "INTEGER DEFAULT 0",
-            "created_at": "TEXT",
-        },
-        "completed_tasks": {
-            "id": "INTEGER",
-            "user_id": "INTEGER",
-            "task_id": "TEXT",
-            "completed_at": "TEXT",
-        },
-        "gift_requests": {
-            "id": "INTEGER",
-            "user_id": "INTEGER",
-            "price": "INTEGER",
-            "status": "TEXT DEFAULT 'pending'",
-            "created_at": "TEXT",
-            "gift_id": "TEXT",
-            "gift_name": "TEXT",
-        },
-        "channels": {
-            "id": "INTEGER",
-            "channel_id": "TEXT",
-            "title": "TEXT",
-            "reward": "INTEGER DEFAULT 15",
-            "created_at": "TEXT",
-        },
-    }
+    # Admins
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS admins (
+            user_id INTEGER PRIMARY KEY,
+            added_at TEXT
+        )
+    """)
 
-    for table, columns in tables_columns.items():
-        cur.execute(f"PRAGMA table_info({table})")
-        existing = {row["name"] for row in cur.fetchall()}
+    # Activity logs
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS activity_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            action TEXT,
+            details TEXT,
+            created_at TEXT
+        )
+    """)
 
-        for column, definition in columns.items():
-            if column not in existing:
-                try:
-                    cur.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-                    )
-                except Exception:
-                    pass
+    # Advertiser requests
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS advertiser_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT,
+            message TEXT,
+            status TEXT DEFAULT 'new',
+            created_at TEXT
+        )
+    """)
 
-    # Agar yangi baza bo'lsa, boshlang'ich kanallarni qo'shish
-    cur.execute("SELECT COUNT(*) AS count FROM channels")
-    channel_count = cur.fetchone()["count"]
+    # Mandatory channels
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS mandatory_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            channel_id TEXT UNIQUE,
+            title TEXT,
+            created_at TEXT
+        )
+    """)
 
-    if channel_count == 0:
-        now = datetime.now().isoformat()
+    # Owner avtomatik admin
+    cur.execute("""
+        INSERT OR IGNORE INTO admins(user_id, added_at)
+        VALUES (?, ?)
+    """, (
+        OWNER_ID,
+        datetime.now().isoformat()
+    ))
 
-        default_channels = [
-            (
-                "@Cossmoss_00",
-                "📢 Cossmoss kanaliga obuna",
-                DEFAULT_TASK_REWARD,
-            ),
-            (
-                "@PromptLab_UZ",
-                "📢 PromptLab kanaliga obuna",
-                DEFAULT_TASK_REWARD,
-            ),
-        ]
+    # Default task channels
+    count = cur.execute(
+        "SELECT COUNT(*) FROM channels"
+    ).fetchone()[0]
 
-        for channel_id, title, reward in default_channels:
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO channels
-                    (channel_id, title, reward, created_at)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (channel_id, title, reward, now),
-                )
-            except Exception:
-                pass
+    if count == 0:
+        cur.execute("""
+            INSERT OR IGNORE INTO channels
+            (channel_id, title, reward, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (
+            "@Cossmoss_00",
+            "Cossmoss",
+            DEFAULT_TASK_REWARD,
+            datetime.now().isoformat()
+        ))
+
+        cur.execute("""
+            INSERT OR IGNORE INTO channels
+            (channel_id, title, reward, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (
+            "@PromptLab_UZ",
+            "PromptLab UZ",
+            DEFAULT_TASK_REWARD,
+            datetime.now().isoformat()
+        ))
 
     conn.commit()
     conn.close()
 
-    print("✅ Database tekshirildi va yangilandi.")
+
+# ============================================================
+# ADMIN
+# ============================================================
+
+def is_admin(user_id: int) -> bool:
+
+    conn = db()
+
+    row = conn.execute(
+        "SELECT user_id FROM admins WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
 
 
-# =========================================================
-# USER
-# =========================================================
+def get_admins():
 
-def add_user(user):
-    conn = get_db()
-    cur = conn.cursor()
+    conn = db()
 
-    cur.execute(
-        "SELECT user_id FROM users WHERE user_id = ?",
-        (user.id,),
+    rows = conn.execute(
+        "SELECT * FROM admins ORDER BY added_at"
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def add_admin(user_id):
+
+    conn = db()
+
+    conn.execute("""
+        INSERT OR IGNORE INTO admins(user_id, added_at)
+        VALUES (?, ?)
+    """, (
+        user_id,
+        datetime.now().isoformat()
+    ))
+
+    conn.commit()
+    conn.close()
+
+
+def remove_admin(user_id):
+
+    if user_id == OWNER_ID:
+        return False
+
+    conn = db()
+
+    conn.execute(
+        "DELETE FROM admins WHERE user_id=?",
+        (user_id,)
     )
 
-    exists = cur.fetchone()
+    conn.commit()
+    conn.close()
 
-    if not exists:
-        cur.execute(
-            """
-            INSERT INTO users
-            (user_id, username, first_name, balance, referrals, created_at)
-            VALUES (?, ?, ?, 0, 0, ?)
-            """,
-            (
-                user.id,
-                user.username or "",
-                user.first_name or "",
-                datetime.now().isoformat(),
-            ),
-        )
-    else:
-        cur.execute(
-            """
+    return True
+
+
+# ============================================================
+# LOG
+# ============================================================
+
+def log_activity(user, action, details=""):
+
+    try:
+
+        conn = db()
+
+        conn.execute("""
+            INSERT INTO activity_logs
+            (user_id, username, action, details, created_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            user.id,
+            user.username or "",
+            action,
+            details,
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+
+        conn.commit()
+        conn.close()
+
+    except Exception as e:
+        logger.error("Log error: %s", e)
+
+
+# ============================================================
+# USERS
+# ============================================================
+
+def add_user(user, referred_by=None):
+
+    conn = db()
+
+    old = conn.execute(
+        "SELECT user_id FROM users WHERE user_id=?",
+        (user.id,)
+    ).fetchone()
+
+    if old:
+        conn.execute("""
             UPDATE users
-            SET username = ?, first_name = ?
-            WHERE user_id = ?
-            """,
-            (
-                user.username or "",
-                user.first_name or "",
-                user.id,
-            ),
-        )
+            SET username=?, first_name=?
+            WHERE user_id=?
+        """, (
+            user.username or "",
+            user.first_name or "",
+            user.id
+        ))
+
+    else:
+
+        valid_ref = None
+
+        if referred_by and referred_by != user.id:
+
+            ref_exists = conn.execute(
+                "SELECT user_id FROM users WHERE user_id=?",
+                (referred_by,)
+            ).fetchone()
+
+            if ref_exists:
+                valid_ref = referred_by
+
+        conn.execute("""
+            INSERT INTO users
+            (user_id, username, first_name, balance,
+             referred_by, referrals, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (
+            user.id,
+            user.username or "",
+            user.first_name or "",
+            0,
+            valid_ref,
+            0,
+            datetime.now().isoformat()
+        ))
+
+        if valid_ref:
+
+            conn.execute("""
+                UPDATE users
+                SET balance=balance+?,
+                    referrals=referrals+1
+                WHERE user_id=?
+            """, (
+                REFERRAL_REWARD,
+                valid_ref
+            ))
 
     conn.commit()
     conn.close()
 
 
 def get_balance(user_id):
-    conn = get_db()
-    cur = conn.cursor()
 
-    cur.execute(
-        "SELECT balance FROM users WHERE user_id = ?",
-        (user_id,),
-    )
+    conn = db()
 
-    row = cur.fetchone()
+    row = conn.execute(
+        "SELECT balance FROM users WHERE user_id=?",
+        (user_id,)
+    ).fetchone()
+
     conn.close()
 
-    return row["balance"] if row else 0
+    return float(row["balance"]) if row else 0
 
 
-# =========================================================
-# MAIN MENU
-# =========================================================
+# ============================================================
+# MENUS
+# ============================================================
 
-def main_menu(user_id):
+def user_menu(user_id):
 
-    buttons = [
-        ["⭐ Stars ishlash"],
-        ["👥 Referal", "📊 Statistika"],
-        ["💳 Gift olish", "ℹ️ Qoidalar"],
+    keyboard = [
+        ["⭐ Stars ishlash", "👥 Referal"],
+        ["📊 Statistika", "💳 Gift olish"],
+        ["ℹ️ Qoidalar", "📢 Reklama"],
     ]
 
-    if user_id == ADMIN_ID:
-        buttons.append(["🎁 So‘rovlar", "⭐ Bot Stars"])
-        buttons.append(["📢 Kanallar"])
+    if is_admin(user_id):
+        keyboard.append(["👑 Admin panel"])
 
     return ReplyKeyboardMarkup(
-        buttons,
-        resize_keyboard=True,
+        keyboard,
+        resize_keyboard=True
     )
 
 
-# =========================================================
+def admin_menu():
+
+    return ReplyKeyboardMarkup(
+        [
+            ["📊 Bot statistikasi", "👥 Foydalanuvchilar"],
+            ["📜 Faoliyat loglari", "👑 Adminlar"],
+            ["📌 Majburiy kanallar", "📢 Topshiriq kanallari"],
+            ["🎁 Gift so‘rovlari", "📣 Reklama so‘rovlari"],
+            ["🔙 Orqaga"],
+        ],
+        resize_keyboard=True
+    )
+
+
+# ============================================================
 # START
-# =========================================================
+# ============================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
-    add_user(user)
+    referred_by = None
 
-    # REFERAL
     if context.args:
+
         try:
-            ref_id = int(context.args[0])
+            referred_by = int(context.args[0])
+        except:
+            referred_by = None
 
-            if ref_id != user.id:
+    add_user(user, referred_by)
 
-                conn = get_db()
-                cur = conn.cursor()
+    log_activity(
+        user,
+        "START",
+        f"referral={referred_by}"
+    )
 
-                cur.execute(
-                    """
-                    SELECT referred_by
-                    FROM users
-                    WHERE user_id = ?
-                    """,
-                    (user.id,),
-                )
+    if referred_by and referred_by != user.id:
 
-                row = cur.fetchone()
-
-                if row and row["referred_by"] is None:
-
-                    cur.execute(
-                        """
-                        UPDATE users
-                        SET referred_by = ?
-                        WHERE user_id = ?
-                        """,
-                        (ref_id, user.id),
-                    )
-
-                    cur.execute(
-                        """
-                        UPDATE users
-                        SET balance = balance + ?,
-                            referrals = referrals + 1
-                        WHERE user_id = ?
-                        """,
-                        (REFERRAL_REWARD, ref_id),
-                    )
-
-                    conn.commit()
-
-                    try:
-                        await context.bot.send_message(
-                            ref_id,
-                            f"🎉 Sizga yangi referal qo‘shildi!\n"
-                            f"⭐ +{REFERRAL_REWARD} Stars",
-                        )
-                    except Exception:
-                        pass
-
-                conn.close()
-
-        except Exception:
+        try:
+            await update.message.reply_text(
+                f"🎉 Referal orqali qo‘shildingiz!\n\n"
+                f"Referal egasiga {REFERRAL_REWARD} Stars balans berildi."
+            )
+        except:
             pass
 
-    balance = get_balance(user.id)
-
     await update.message.reply_text(
-        f"⭐ FrostStars botiga xush kelibsiz!\n\n"
-        f"💰 Balansingiz: {balance} ⭐\n\n"
-        f"Stars yig‘ing va Gift olish uchun so‘rov yuboring.",
-        reply_markup=main_menu(user.id),
+        f"👋 Salom, {user.first_name}!\n\n"
+        f"⭐ FrostStars botiga xush kelibsiz!",
+        reply_markup=user_menu(user.id)
     )
 
 
-# =========================================================
-# STARS ISHLASH
-# =========================================================
+# ============================================================
+# STARS TASKS
+# ============================================================
 
-async def stars_work(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stars_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    conn = get_db()
-    cur = conn.cursor()
+    conn = db()
 
-    cur.execute(
-        """
-        SELECT id, channel_id, title, reward
-        FROM channels
-        ORDER BY id ASC
-        """
-    )
+    channels = conn.execute(
+        "SELECT * FROM channels ORDER BY id"
+    ).fetchall()
 
-    channels = cur.fetchall()
+    completed = conn.execute("""
+        SELECT task_id
+        FROM completed_tasks
+        WHERE user_id=?
+    """, (
+        user.id,
+    )).fetchall()
+
+    completed_ids = {
+        row["task_id"]
+        for row in completed
+    }
+
     conn.close()
-
-    if not channels:
-        await update.message.reply_text(
-            "📭 Hozircha topshiriqlar mavjud emas."
-        )
-        return
 
     keyboard = []
 
-    for channel in channels:
+    for ch in channels:
 
-        task_id = f"channel_{channel['id']}"
+        if ch["id"] in completed_ids:
 
-        conn = get_db()
-        cur = conn.cursor()
+            text = f"✅ {ch['title']}"
 
-        cur.execute(
-            """
-            SELECT id
-            FROM completed_tasks
-            WHERE user_id = ? AND task_id = ?
-            """,
-            (user_id, task_id),
-        )
-
-        completed = cur.fetchone()
-        conn.close()
-
-        if completed:
-            button_text = (
-                f"✅ {channel['title']} "
-                f"(+{channel['reward']} ⭐)"
-            )
         else:
-            button_text = (
-                f"{channel['title']} "
-                f"(+{channel['reward']} ⭐)"
-            )
+
+            text = f"⭐ {ch['title']} +{ch['reward']}"
 
         keyboard.append([
             InlineKeyboardButton(
-                button_text,
-                callback_data=f"task:{channel['id']}",
+                text,
+                callback_data=f"task:{ch['id']}"
             )
         ])
 
+    keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Orqaga",
+            callback_data="back:main"
+        )
+    ])
+
     await update.message.reply_text(
         "⭐ Stars ishlash\n\n"
-        "Kanalga obuna bo‘ling va tekshirish tugmasini bosing.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "Kanalga obuna bo‘ling va tekshiring:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+    log_activity(user, "BUTTON", "Stars ishlash")
 
-# =========================================================
-# TASK CALLBACK
-# =========================================================
 
 async def task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    user = query.from_user
 
-    try:
-        channel_db_id = int(query.data.split(":")[1])
-    except Exception:
-        return
+    task_id = int(query.data.split(":")[1])
 
-    conn = get_db()
-    cur = conn.cursor()
+    conn = db()
 
-    cur.execute(
-        """
-        SELECT id, channel_id, title, reward
-        FROM channels
-        WHERE id = ?
-        """,
-        (channel_db_id,),
-    )
+    channel = conn.execute(
+        "SELECT * FROM channels WHERE id=?",
+        (task_id,)
+    ).fetchone()
 
-    channel = cur.fetchone()
-
-    if not channel:
-        conn.close()
-
-        await query.edit_message_text(
-            "❌ Bu kanal topshirig‘i topilmadi."
-        )
-        return
-
-    task_id = f"channel_{channel['id']}"
-
-    cur.execute(
-        """
+    completed = conn.execute("""
         SELECT id
         FROM completed_tasks
-        WHERE user_id = ? AND task_id = ?
-        """,
-        (user_id, task_id),
-    )
-
-    completed = cur.fetchone()
-
-    if completed:
-        conn.close()
-
-        await query.edit_message_text(
-            "✅ Bu topshiriqni avval bajargansiz."
-        )
-        return
+        WHERE user_id=? AND task_id=?
+    """, (
+        user.id,
+        task_id
+    )).fetchone()
 
     conn.close()
 
-    # Kanalga o'tish
-    keyboard = [
-        [
+    if not channel:
+
+        await query.edit_message_text(
+            "❌ Topshiriq topilmadi."
+        )
+
+        return
+
+    if completed:
+
+        await query.edit_message_text(
+            "✅ Bu topshiriqni oldin bajargansiz."
+        )
+
+        return
+
+    channel_id = channel["channel_id"]
+
+    link = (
+        f"https://t.me/{channel_id.lstrip('@')}"
+        if channel_id.startswith("@")
+        else None
+    )
+
+    buttons = []
+
+    if link:
+
+        buttons.append([
             InlineKeyboardButton(
                 "📢 Kanalga kirish",
-                url=f"https://t.me/{channel['channel_id'].replace('@', '')}",
+                url=link
             )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔎 Tekshirish",
-                callback_data=f"checktask:{channel['id']}",
-            )
-        ],
-    ]
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔎 Tekshirish",
+            callback_data=f"check:{task_id}"
+        )
+    ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            "🔙 Orqaga",
+            callback_data="back:stars"
+        )
+    ])
 
     await query.edit_message_text(
-        f"{channel['title']}\n\n"
-        f"⭐ Mukofot: +{channel['reward']} Stars\n\n"
-        f"1️⃣ Kanalga obuna bo‘ling\n"
-        f"2️⃣ Keyin «🔎 Tekshirish» tugmasini bosing.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        f"📢 {channel['title']}\n\n"
+        f"⭐ Mukofot: {channel['reward']} Stars\n\n"
+        f"Kanalga obuna bo‘ling, keyin Tekshirish tugmasini bosing.",
+        reply_markup=InlineKeyboardMarkup(buttons)
+    )
+
+    log_activity(
+        user,
+        "TASK_OPEN",
+        f"task={task_id}"
     )
 
 
-# =========================================================
-# TASK CHECK
-# =========================================================
-
-async def check_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def check_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    user = query.from_user
 
-    try:
-        channel_db_id = int(query.data.split(":")[1])
-    except Exception:
-        return
+    task_id = int(query.data.split(":")[1])
 
-    conn = get_db()
-    cur = conn.cursor()
+    conn = db()
 
-    cur.execute(
-        """
-        SELECT id, channel_id, title, reward
-        FROM channels
-        WHERE id = ?
-        """,
-        (channel_db_id,),
-    )
+    channel = conn.execute(
+        "SELECT * FROM channels WHERE id=?",
+        (task_id,)
+    ).fetchone()
 
-    channel = cur.fetchone()
-
-    if not channel:
-        conn.close()
-
-        await query.edit_message_text(
-            "❌ Kanal topilmadi."
-        )
-        return
-
-    task_id = f"channel_{channel['id']}"
-
-    cur.execute(
-        """
+    completed = conn.execute("""
         SELECT id
         FROM completed_tasks
-        WHERE user_id = ? AND task_id = ?
-        """,
-        (user_id, task_id),
-    )
+        WHERE user_id=? AND task_id=?
+    """, (
+        user.id,
+        task_id
+    )).fetchone()
 
-    if cur.fetchone():
-        conn.close()
+    conn.close()
+
+    if not channel:
+
+        await query.edit_message_text(
+            "❌ Topshiriq topilmadi."
+        )
+
+        return
+
+    if completed:
 
         await query.edit_message_text(
             "✅ Bu topshiriq allaqachon bajarilgan."
         )
+
         return
 
     try:
+
         member = await context.bot.get_chat_member(
-            chat_id=channel["channel_id"],
-            user_id=user_id,
+            channel["channel_id"],
+            user.id
         )
 
         status = member.status
 
-        is_member = status in [
+        subscribed = status in (
             "member",
             "administrator",
-            "creator",
-        ]
+            "creator"
+        )
 
     except Exception as e:
 
-        conn.close()
+        logger.error("Subscription check error: %s", e)
 
         await query.edit_message_text(
-            "⚠️ Kanalni tekshirib bo‘lmadi.\n\n"
-            "Bot kanalga admin qilib qo‘yilganini tekshiring."
-        )
-
-        print("Channel check error:", e)
-        return
-
-    if not is_member:
-
-        conn.close()
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "📢 Kanalga kirish",
-                    url=f"https://t.me/{channel['channel_id'].replace('@', '')}",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "🔎 Qayta tekshirish",
-                    callback_data=f"checktask:{channel['id']}",
-                )
-            ],
-        ]
-
-        await query.edit_message_text(
-            "❌ Siz hali kanalga obuna bo‘lmagansiz.\n\n"
-            "Avval kanalga kiring, keyin qayta tekshiring.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            "⚠️ Obunani tekshirib bo‘lmadi.\n\n"
+            "Bot kanalga admin qilinganini tekshiring."
         )
 
         return
 
-    # Mukofot berish
+    if not subscribed:
+
+        await query.answer(
+            "❌ Avval kanalga obuna bo‘ling!",
+            show_alert=True
+        )
+
+        return
+
+    conn = db()
+
     try:
 
-        cur.execute(
-            """
+        conn.execute("""
             INSERT INTO completed_tasks
             (user_id, task_id, completed_at)
             VALUES (?, ?, ?)
-            """,
-            (
-                user_id,
-                task_id,
-                datetime.now().isoformat(),
-            ),
-        )
+        """, (
+            user.id,
+            task_id,
+            datetime.now().isoformat()
+        ))
 
-        cur.execute(
-            """
+        conn.execute("""
             UPDATE users
-            SET balance = balance + ?
-            WHERE user_id = ?
-            """,
-            (
-                channel["reward"],
-                user_id,
-            ),
-        )
+            SET balance=balance+?
+            WHERE user_id=?
+        """, (
+            channel["reward"],
+            user.id
+        ))
 
         conn.commit()
 
     except sqlite3.IntegrityError:
 
         conn.rollback()
-        conn.close()
 
         await query.edit_message_text(
-            "✅ Bu topshiriqni avval bajargansiz."
+            "✅ Bu topshiriq allaqachon bajarilgan."
         )
+
+        conn.close()
         return
 
     conn.close()
 
-    new_balance = get_balance(user_id)
+    log_activity(
+        user,
+        "TASK_COMPLETED",
+        f"task={task_id}, reward={channel['reward']}"
+    )
 
     await query.edit_message_text(
         f"🎉 Topshiriq bajarildi!\n\n"
-        f"⭐ +{channel['reward']} Stars\n"
-        f"💰 Balansingiz: {new_balance} ⭐"
+        f"⭐ +{channel['reward']} Stars qo‘shildi."
     )
 
 
-# =========================================================
+# ============================================================
 # REFERAL
-# =========================================================
+# ============================================================
 
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
-    bot = await context.bot.get_me()
+    me = await context.bot.get_me()
 
-    link = f"https://t.me/{bot.username}?start={user.id}"
+    link = f"https://t.me/{me.username}?start={user.id}"
 
-    conn = get_db()
-    cur = conn.cursor()
+    conn = db()
 
-    cur.execute(
-        """
+    row = conn.execute("""
         SELECT referrals, balance
         FROM users
-        WHERE user_id = ?
-        """,
-        (user.id,),
-    )
+        WHERE user_id=?
+    """, (
+        user.id,
+    )).fetchone()
 
-    row = cur.fetchone()
     conn.close()
 
     referrals = row["referrals"] if row else 0
     balance = row["balance"] if row else 0
 
     await update.message.reply_text(
-        f"👥 Referal tizimi\n\n"
-        f"🔗 Sizning referal linkingiz:\n"
-        f"{link}\n\n"
-        f"👥 Referallar: {referrals}\n"
-        f"⭐ Referaldan olgan Stars: {referrals * REFERRAL_REWARD}\n"
-        f"💰 Balans: {balance} ⭐\n\n"
-        f"Har bir yangi referal uchun "
-        f"+{REFERRAL_REWARD} ⭐ beriladi."
+        "👥 Referal tizimi\n\n"
+        f"👤 Referallar: {referrals}\n"
+        f"⭐ Balans: {balance:g}\n\n"
+        f"🔗 Sizning havolangiz:\n{link}",
+        reply_markup=user_menu(user.id)
     )
 
+    log_activity(user, "BUTTON", "Referal")
 
-# =========================================================
+
+# ============================================================
 # STATISTIKA
-# =========================================================
+# ============================================================
 
 async def statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    conn = get_db()
-    cur = conn.cursor()
+    conn = db()
 
-    cur.execute(
-        """
+    row = conn.execute("""
         SELECT balance, referrals
         FROM users
-        WHERE user_id = ?
-        """,
-        (user_id,),
-    )
+        WHERE user_id=?
+    """, (
+        user.id,
+    )).fetchone()
 
-    user = cur.fetchone()
-
-    cur.execute(
-        """
-        SELECT COUNT(*) AS count
+    tasks = conn.execute("""
+        SELECT COUNT(*)
         FROM completed_tasks
-        WHERE user_id = ?
-        """,
-        (user_id,),
-    )
-
-    tasks = cur.fetchone()["count"]
+        WHERE user_id=?
+    """, (
+        user.id,
+    )).fetchone()[0]
 
     conn.close()
 
-    balance = user["balance"] if user else 0
-    referrals = user["referrals"] if user else 0
+    balance = row["balance"] if row else 0
+    referrals = row["referrals"] if row else 0
 
     await update.message.reply_text(
-        f"📊 Sizning statistikangiz\n\n"
-        f"⭐ Balans: {balance}\n"
-        f"📋 Bajarilgan topshiriqlar: {tasks}\n"
-        f"👥 Referallar: {referrals}"
+        "📊 Sizning statistikangiz\n\n"
+        f"⭐ Balans: {balance:g}\n"
+        f"✅ Bajarilgan topshiriqlar: {tasks}\n"
+        f"👥 Referallar: {referrals}",
+        reply_markup=user_menu(user.id)
     )
 
+    log_activity(user, "BUTTON", "Statistika")
 
-# =========================================================
+
+# ============================================================
 # QOIDALAR
-# =========================================================
+# ============================================================
 
 async def rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    user = update.effective_user
+
     await update.message.reply_text(
-        "ℹ️ FrostStars qoidalari\n\n"
-        "1. Kanal topshiriqlarini bajaring.\n"
-        "2. Har bir topshiriq uchun Stars olasiz.\n"
-        "3. Referal orqali qo‘shimcha Stars olasiz.\n"
-        "4. Yig‘ilgan Stars bilan Gift olish uchun so‘rov yuborishingiz mumkin.\n"
-        "5. Gift admin tomonidan qo‘lda yuboriladi.\n"
-        "6. So‘rov tasdiqlangandan keyin admin Giftni yuboradi."
+        "ℹ️ Qoidalar\n\n"
+        "1. Kanal topshiriqlarini halol bajaring.\n"
+        "2. Bir topshiriq uchun mukofot faqat bir marta beriladi.\n"
+        "3. Soxta akkauntlar va aldov taqiqlanadi.\n"
+        "4. Gift olish uchun balans yetarli bo‘lishi kerak.\n"
+        "5. Bot qoidalarini buzgan akkaunt cheklanishi mumkin.",
+        reply_markup=user_menu(user.id)
     )
 
+    log_activity(user, "BUTTON", "Qoidalar")
 
-# =========================================================
-# GIFT LIST
-# =========================================================
 
-async def get_real_gifts(bot):
+# ============================================================
+# GIFT
+# ============================================================
+
+async def get_real_gifts(context):
 
     try:
-        gifts = await bot.get_available_gifts()
+
+        gifts = await context.bot.get_available_gifts()
 
         result = []
 
         for gift in gifts.gifts:
 
-            try:
-                price = gift.star_count
-            except Exception:
-                continue
+            star_count = getattr(
+                gift,
+                "star_count",
+                None
+            )
 
-            gift_id = str(gift.id)
+            gift_id = getattr(
+                gift,
+                "id",
+                None
+            )
+
+            sticker = getattr(
+                gift,
+                "sticker",
+                None
+            )
 
             emoji = "🎁"
 
-            try:
-                if gift.sticker and gift.sticker.emoji:
-                    emoji = gift.sticker.emoji
-            except Exception:
-                pass
+            if sticker:
 
-            result.append({
-                "id": gift_id,
-                "price": price,
-                "emoji": emoji,
-            })
+                emoji = getattr(
+                    sticker,
+                    "emoji",
+                    "🎁"
+                )
 
-        result.sort(key=lambda x: x["price"])
+            if star_count and gift_id:
+
+                result.append({
+                    "id": gift_id,
+                    "price": star_count,
+                    "emoji": emoji
+                })
 
         return result
 
     except Exception as e:
 
-        print("Gift list error:", e)
+        logger.error("Gift error: %s", e)
+
         return []
 
 
-# =========================================================
-# GIFT OLISH
-# =========================================================
-
 async def gift_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    gifts = await get_real_gifts(context.bot)
+    user = update.effective_user
+
+    balance = get_balance(user.id)
+
+    gifts = await get_real_gifts(context)
 
     if not gifts:
 
         await update.message.reply_text(
-            "❌ Hozircha Giftlar ro‘yxatini olish imkoni bo‘lmadi."
+            "🎁 Hozircha mavjud gift topilmadi.",
+            reply_markup=user_menu(user.id)
         )
-        return
 
-    balance = get_balance(update.effective_user.id)
+        return
 
     keyboard = []
 
     for gift in gifts:
 
-        text = (
-            f"{gift['emoji']} Gift — "
-            f"{gift['price']} ⭐"
-        )
-
         keyboard.append([
             InlineKeyboardButton(
-                text,
-                callback_data=f"realgift:{gift['id']}",
+                f"{gift['emoji']} {gift['price']} ⭐",
+                callback_data=(
+                    f"gift:{gift['id']}:{gift['price']}"
+                )
             )
         ])
 
+    keyboard.append([
+        InlineKeyboardButton(
+            "🔙 Orqaga",
+            callback_data="back:main"
+        )
+    ])
+
     await update.message.reply_text(
         f"💳 Gift olish\n\n"
-        f"💰 Sizning balansingiz: {balance} ⭐\n\n"
-        f"Kerakli Giftni tanlang:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        f"⭐ Sizning balansingiz: {balance:g}\n\n"
+        f"Gift tanlang:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
+    log_activity(user, "BUTTON", "Gift olish")
 
-# =========================================================
-# GIFT TANLASH
-# =========================================================
 
-async def real_gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
-    gift_id = query.data.split(":", 1)[1]
+    user = query.from_user
 
-    gifts = await get_real_gifts(context.bot)
+    parts = query.data.split(":")
 
-    selected = None
+    gift_id = parts[1]
+    price = int(parts[2])
 
-    for gift in gifts:
-        if gift["id"] == gift_id:
-            selected = gift
-            break
+    balance = get_balance(user.id)
 
-    if not selected:
+    if balance < price:
 
-        await query.edit_message_text(
-            "❌ Bu Gift hozir mavjud emas."
-        )
-        return
-
-    balance = get_balance(query.from_user.id)
-
-    if balance < selected["price"]:
-
-        await query.edit_message_text(
-            f"❌ Balansingiz yetarli emas.\n\n"
-            f"💰 Balans: {balance} ⭐\n"
-            f"🎁 Gift: {selected['price']} ⭐\n"
-            f"➖ Yetishmaydi: {selected['price'] - balance} ⭐"
+        await query.answer(
+            f"❌ Balansingiz yetarli emas. Kerak: {price} ⭐",
+            show_alert=True
         )
 
         return
@@ -905,1146 +998,1305 @@ async def real_gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = [
         [
             InlineKeyboardButton(
-                "✅ So‘rov yuborish",
-                callback_data=(
-                    f"confirmgift:{selected['id']}:"
-                    f"{selected['price']}:"
-                    f"{selected['emoji']}"
-                ),
+                "✅ Tasdiqlash",
+                callback_data=f"confirmgift:{gift_id}:{price}"
             )
         ],
         [
             InlineKeyboardButton(
-                "⬅️ Bekor qilish",
-                callback_data="cancelgift",
+                "❌ Bekor qilish",
+                callback_data="back:main"
             )
-        ],
+        ]
     ]
 
     await query.edit_message_text(
-        f"🎁 Gift tanlandi\n\n"
-        f"{selected['emoji']} Gift\n"
-        f"⭐ Narxi: {selected['price']} Stars\n\n"
-        f"💰 Sizning balansingiz: {balance} Stars\n\n"
-        f"So‘rov yuborilsinmi?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        f"🎁 Gift buyurtmasi\n\n"
+        f"💰 Narxi: {price} ⭐\n"
+        f"⭐ Balansingiz: {balance:g}\n\n"
+        f"Buyurtmani tasdiqlaysizmi?",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# =========================================================
-# GIFT CONFIRM
-# =========================================================
-
-async def confirm_gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def confirm_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
     await query.answer()
 
-    parts = query.data.split(":", 3)
+    user = query.from_user
 
-    if len(parts) < 4:
-        return
+    parts = query.data.split(":")
 
     gift_id = parts[1]
+    price = int(parts[2])
 
-    try:
-        price = int(parts[2])
-    except Exception:
-        return
+    conn = db()
 
-    gift_name = parts[3]
+    row = conn.execute(
+        "SELECT balance FROM users WHERE user_id=?",
+        (user.id,)
+    ).fetchone()
 
-    user_id = query.from_user.id
+    if not row or row["balance"] < price:
 
-    conn = get_db()
-    cur = conn.cursor()
-
-    # Starsni atomik tarzda ushlab qolish
-    cur.execute(
-        """
-        UPDATE users
-        SET balance = balance - ?
-        WHERE user_id = ?
-        AND balance >= ?
-        """,
-        (
-            price,
-            user_id,
-            price,
-        ),
-    )
-
-    if cur.rowcount == 0:
-
-        conn.rollback()
         conn.close()
 
         await query.edit_message_text(
-            "❌ Balansingiz yetarli emas."
+            "❌ Balans yetarli emas."
         )
+
         return
 
-    cur.execute(
-        """
+    conn.execute("""
+        UPDATE users
+        SET balance=balance-?
+        WHERE user_id=?
+    """, (
+        price,
+        user.id
+    ))
+
+    cur = conn.execute("""
         INSERT INTO gift_requests
         (user_id, price, status, created_at, gift_id, gift_name)
         VALUES (?, ?, 'pending', ?, ?, ?)
-        """,
-        (
-            user_id,
-            price,
-            datetime.now().isoformat(),
-            gift_id,
-            gift_name,
-        ),
-    )
+    """, (
+        user.id,
+        price,
+        datetime.now().isoformat(),
+        gift_id,
+        "Telegram Gift"
+    ))
 
     request_id = cur.lastrowid
 
     conn.commit()
     conn.close()
 
-    await query.edit_message_text(
-        f"✅ Gift so‘rovi yuborildi!\n\n"
-        f"🆔 So‘rov: #{request_id}\n"
-        f"🎁 Gift: {gift_name}\n"
-        f"⭐ Narxi: {price} Stars\n\n"
-        f"⏳ Admin so‘rovni ko‘rib chiqadi."
+    log_activity(
+        user,
+        "GIFT_ORDER",
+        f"id={request_id}, price={price}"
     )
 
-    # Adminga yuborish
-    try:
-
-        username = (
-            f"@{query.from_user.username}"
-            if query.from_user.username
-            else "Username yo‘q"
-        )
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "✅ Tasdiqlash",
-                    callback_data=f"approve:{request_id}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Rad etish",
-                    callback_data=f"reject:{request_id}",
-                ),
-            ]
-        ]
-
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"🎁 Yangi Gift so‘rovi!\n\n"
-            f"🆔 So‘rov: #{request_id}\n"
-            f"👤 Foydalanuvchi: {query.from_user.first_name}\n"
-            f"🔗 Username: {username}\n"
-            f"🆔 User ID: {user_id}\n"
-            f"🎁 Gift: {gift_name}\n"
-            f"⭐ Narxi: {price}\n\n"
-            f"Foydalanuvchi Starsni oldindan ushlab turdi.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    except Exception as e:
-        print("Admin notification error:", e)
-
-
-# =========================================================
-# GIFT CANCEL
-# =========================================================
-
-async def cancel_gift_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-    await query.answer()
-
     await query.edit_message_text(
-        "❌ Gift so‘rovi bekor qilindi."
+        f"✅ Buyurtma qabul qilindi!\n\n"
+        f"🆔 Buyurtma: #{request_id}\n"
+        f"⭐ Narxi: {price}\n\n"
+        f"Admin tekshirganidan keyin gift yuboriladi."
+    )
+
+    await notify_admins(
+        context,
+        f"🎁 Yangi Gift so‘rovi\n\n"
+        f"🆔 #{request_id}\n"
+        f"👤 {user.first_name}\n"
+        f"🆔 User ID: {user.id}\n"
+        f"⭐ Narx: {price}"
     )
 
 
-# =========================================================
-# ADMIN REQUESTS
-# =========================================================
+# ============================================================
+# ADMIN NOTIFICATION
+# ============================================================
 
-async def requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def notify_admins(context, text):
 
-    if update.effective_user.id != ADMIN_ID:
+    for row in get_admins():
+
+        try:
+
+            await context.bot.send_message(
+                row["user_id"],
+                text
+            )
+
+        except Exception as e:
+
+            logger.error(
+                "Admin notification error: %s",
+                e
+            )
+
+
+# ============================================================
+# ADMIN PANEL
+# ============================================================
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+
+        await update.message.reply_text(
+            "❌ Sizda admin huquqi yo‘q."
+        )
+
         return
 
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT *
-        FROM gift_requests
-        WHERE status IN ('pending', 'approved')
-        ORDER BY id DESC
-        """
+    await update.message.reply_text(
+        "👑 Admin panel\n\n"
+        "Kerakli bo‘limni tanlang:",
+        reply_markup=admin_menu()
     )
 
-    rows = cur.fetchall()
+    log_activity(user, "ADMIN_PANEL", "open")
+
+
+# ============================================================
+# BOT STATISTIKASI
+# ============================================================
+
+async def bot_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    users = conn.execute(
+        "SELECT COUNT(*) FROM users"
+    ).fetchone()[0]
+
+    tasks = conn.execute(
+        "SELECT COUNT(*) FROM completed_tasks"
+    ).fetchone()[0]
+
+    orders = conn.execute(
+        "SELECT COUNT(*) FROM gift_requests"
+    ).fetchone()[0]
+
+    pending = conn.execute("""
+        SELECT COUNT(*)
+        FROM gift_requests
+        WHERE status='pending'
+    """).fetchone()[0]
+
+    conn.close()
+
+    await update.message.reply_text(
+        "📊 Bot statistikasi\n\n"
+        f"👥 Foydalanuvchilar: {users}\n"
+        f"✅ Bajarilgan topshiriqlar: {tasks}\n"
+        f"🎁 Jami buyurtmalar: {orders}\n"
+        f"⏳ Kutilayotgan buyurtmalar: {pending}",
+        reply_markup=admin_menu()
+    )
+
+
+# ============================================================
+# USERS
+# ============================================================
+
+async def users_statistics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    rows = conn.execute("""
+        SELECT user_id, username, first_name,
+               balance, referrals, created_at
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 20
+    """).fetchall()
+
+    total = conn.execute(
+        "SELECT COUNT(*) FROM users"
+    ).fetchone()[0]
+
+    conn.close()
+
+    text = f"👥 Foydalanuvchilar: {total}\n\n"
+
+    for row in rows:
+
+        name = row["first_name"] or "Noma'lum"
+
+        text += (
+            f"👤 {name}\n"
+            f"🆔 {row['user_id']}\n"
+            f"⭐ {row['balance']:g}\n"
+            f"👥 Ref: {row['referrals']}\n\n"
+        )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=admin_menu()
+    )
+
+
+# ============================================================
+# LOGS
+# ============================================================
+
+async def activity_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    rows = conn.execute("""
+        SELECT *
+        FROM activity_logs
+        ORDER BY id DESC
+        LIMIT 30
+    """).fetchall()
+
     conn.close()
 
     if not rows:
 
         await update.message.reply_text(
-            "📭 Hozircha ochiq Gift so‘rovlari yo‘q."
+            "📜 Loglar hozircha yo‘q.",
+            reply_markup=admin_menu()
         )
+
         return
+
+    text = "📜 So‘nggi faoliyatlar\n\n"
 
     for row in rows:
 
-        status_text = (
-            "⏳ Kutilmoqda"
-            if row["status"] == "pending"
-            else "✅ Tasdiqlangan — Giftni yuboring"
+        text += (
+            f"#{row['id']} | "
+            f"{row['created_at']}\n"
+            f"👤 {row['user_id']} "
+            f"@{row['username'] or '-'}\n"
+            f"🔹 {row['action']}\n"
+            f"📝 {row['details']}\n\n"
         )
-
-        keyboard = []
-
-        if row["status"] == "pending":
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    "✅ Tasdiqlash",
-                    callback_data=f"approve:{row['id']}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Rad etish",
-                    callback_data=f"reject:{row['id']}",
-                ),
-            ])
-
-        elif row["status"] == "approved":
-
-            keyboard.append([
-                InlineKeyboardButton(
-                    "🎁 Berildi",
-                    callback_data=f"delivered:{row['id']}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Rad etish",
-                    callback_data=f"rejectapproved:{row['id']}",
-                ),
-            ])
-
-        await update.message.reply_text(
-            f"🎁 Gift so‘rovi #{row['id']}\n\n"
-            f"👤 User ID: {row['user_id']}\n"
-            f"🎁 Gift: {row['gift_name']}\n"
-            f"⭐ Narxi: {row['price']}\n"
-            f"📌 Holat: {status_text}",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-
-# =========================================================
-# ADMIN REQUEST CALLBACK
-# =========================================================
-
-async def request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    query = update.callback_query
-
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Siz admin emassiz.", show_alert=True)
-        return
-
-    await query.answer()
-
-    action, request_id_text = query.data.split(":", 1)
-
-    try:
-        request_id = int(request_id_text)
-    except Exception:
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT *
-        FROM gift_requests
-        WHERE id = ?
-        """,
-        (request_id,),
-    )
-
-    request = cur.fetchone()
-
-    if not request:
-
-        conn.close()
-
-        await query.edit_message_text(
-            "❌ So‘rov topilmadi."
-        )
-        return
-
-    user_id = request["user_id"]
-    price = request["price"]
-
-    # -----------------------------------------------------
-    # TASDIQLASH
-    # -----------------------------------------------------
-
-    if action == "approve":
-
-        cur.execute(
-            """
-            UPDATE gift_requests
-            SET status = 'approved'
-            WHERE id = ?
-            AND status = 'pending'
-            """,
-            (request_id,),
-        )
-
-        if cur.rowcount == 0:
-
-            conn.close()
-
-            await query.answer(
-                "Bu so‘rov allaqachon ko‘rib chiqilgan.",
-                show_alert=True,
-            )
-            return
-
-        conn.commit()
-        conn.close()
-
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"✅ Gift so‘rovingiz tasdiqlandi!\n\n"
-                f"🎁 Gift: {request['gift_name']}\n"
-                f"⭐ Narxi: {price} Stars\n\n"
-                f"⏳ Admin Giftni qo‘lda yuboradi."
-            )
-        except Exception:
-            pass
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "🎁 Berildi",
-                    callback_data=f"delivered:{request_id}",
-                ),
-                InlineKeyboardButton(
-                    "❌ Rad etish",
-                    callback_data=f"rejectapproved:{request_id}",
-                ),
-            ]
-        ]
-
-        await query.edit_message_text(
-            f"✅ So‘rov #{request_id} tasdiqlandi.\n\n"
-            f"🎁 Gift: {request['gift_name']}\n"
-            f"👤 User ID: {user_id}\n"
-            f"⭐ {price} Stars\n\n"
-            f"⚠️ Endi Giftni Telegram orqali foydalanuvchiga "
-            f"qo‘lda yuboring.\n\n"
-            f"Yuborganingizdan keyin «🎁 Berildi» tugmasini bosing.",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    # -----------------------------------------------------
-    # PENDING RAD ETISH
-    # -----------------------------------------------------
-
-    elif action == "reject":
-
-        cur.execute(
-            """
-            UPDATE gift_requests
-            SET status = 'rejected'
-            WHERE id = ?
-            AND status = 'pending'
-            """,
-            (request_id,),
-        )
-
-        if cur.rowcount == 0:
-
-            conn.close()
-
-            await query.answer(
-                "Bu so‘rov allaqachon ko‘rib chiqilgan.",
-                show_alert=True,
-            )
-            return
-
-        cur.execute(
-            """
-            UPDATE users
-            SET balance = balance + ?
-            WHERE user_id = ?
-            """,
-            (price, user_id),
-        )
-
-        conn.commit()
-        conn.close()
-
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"❌ Gift so‘rovingiz rad etildi.\n\n"
-                f"⭐ {price} Stars balansingizga qaytarildi."
-            )
-        except Exception:
-            pass
-
-        await query.edit_message_text(
-            f"❌ So‘rov #{request_id} rad etildi.\n\n"
-            f"⭐ {price} Stars foydalanuvchiga qaytarildi."
-        )
-
-    # -----------------------------------------------------
-    # GIFT BERILDI
-    # -----------------------------------------------------
-
-    elif action == "delivered":
-
-        cur.execute(
-            """
-            UPDATE gift_requests
-            SET status = 'delivered'
-            WHERE id = ?
-            AND status = 'approved'
-            """,
-            (request_id,),
-        )
-
-        if cur.rowcount == 0:
-
-            conn.close()
-
-            await query.answer(
-                "Bu so‘rov allaqachon yakunlangan.",
-                show_alert=True,
-            )
-            return
-
-        conn.commit()
-        conn.close()
-
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"🎉 Giftingiz berildi!\n\n"
-                f"🎁 {request['gift_name']}\n\n"
-                f"Rahmat! ⭐ FrostStars"
-            )
-        except Exception:
-            pass
-
-        await query.edit_message_text(
-            f"🎁 So‘rov #{request_id} yakunlandi.\n\n"
-            f"Gift foydalanuvchiga berildi."
-        )
-
-    # -----------------------------------------------------
-    # TASDIQLANGAN SO‘ROVNI RAD ETISH
-    # -----------------------------------------------------
-
-    elif action == "rejectapproved":
-
-        cur.execute(
-            """
-            UPDATE gift_requests
-            SET status = 'rejected'
-            WHERE id = ?
-            AND status = 'approved'
-            """,
-            (request_id,),
-        )
-
-        if cur.rowcount == 0:
-
-            conn.close()
-
-            await query.answer(
-                "Bu so‘rov allaqachon yakunlangan.",
-                show_alert=True,
-            )
-            return
-
-        cur.execute(
-            """
-            UPDATE users
-            SET balance = balance + ?
-            WHERE user_id = ?
-            """,
-            (price, user_id),
-        )
-
-        conn.commit()
-        conn.close()
-
-        try:
-            await context.bot.send_message(
-                user_id,
-                f"❌ Tasdiqlangan Gift so‘rovi bekor qilindi.\n\n"
-                f"⭐ {price} Stars balansingizga qaytarildi."
-            )
-        except Exception:
-            pass
-
-        await query.edit_message_text(
-            f"❌ So‘rov #{request_id} bekor qilindi.\n\n"
-            f"⭐ {price} Stars qaytarildi."
-        )
-
-
-# =========================================================
-# BOT STARS
-# =========================================================
-
-async def bot_stars(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if update.effective_user.id != ADMIN_ID:
-        return
 
     await update.message.reply_text(
-        "⭐ FrostStars Stars tizimi\n\n"
-        "Foydalanuvchilarning Starslari bot ichidagi "
-        "ichki balans hisoblanadi.\n\n"
-        "🎁 Giftlar admin tomonidan qo‘lda yuboriladi.\n\n"
-        "Bu bo‘lim real Telegram Stars balansini "
-        "ko‘rsatmaydi."
+        text[:4000],
+        reply_markup=admin_menu()
     )
 
 
-# =========================================================
-# ADMIN CHANNEL MENU
-# =========================================================
+# ============================================================
+# ADMINLAR
+# ============================================================
 
-async def channel_admin_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def admins_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    if update.effective_user.id != ADMIN_ID:
+    user = update.effective_user
+
+    if not is_admin(user.id):
         return
 
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "➕ Kanal qo‘shish",
-                callback_data="adminchannel:add",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "📋 Kanallar",
-                callback_data="adminchannel:list",
-            )
-        ],
-    ]
+    rows = get_admins()
 
-    await update.message.reply_text(
-        "📢 Kanal boshqaruvi\n\n"
-        "Bu yerda kanallarni Telegramning o‘zidan "
-        "qo‘shishingiz va boshqarishingiz mumkin.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
+    keyboard = []
 
+    text = "👑 Adminlar\n\n"
 
-# =========================================================
-# CHANNEL LIST
-# =========================================================
+    for row in rows:
 
-async def channel_admin_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+        uid = row["user_id"]
 
-    query = update.callback_query
+        text += f"🆔 {uid}"
 
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
-        return
+        if uid == OWNER_ID:
+            text += " — 👑 OWNER"
 
-    await query.answer()
+        text += "\n"
 
-    action = query.data.split(":", 1)[1]
-
-    if action == "add":
-
-        context.user_data["channel_add_step"] = "channel_id"
-
-        await query.edit_message_text(
-            "➕ Yangi kanal qo‘shish\n\n"
-            "1️⃣ Kanal username'ini yuboring.\n\n"
-            "Masalan:\n"
-            "@YangiKanal"
-        )
-
-        return
-
-    if action == "list":
-
-        conn = get_db()
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            SELECT id, channel_id, title, reward
-            FROM channels
-            ORDER BY id ASC
-            """
-        )
-
-        channels = cur.fetchall()
-        conn.close()
-
-        if not channels:
-
-            await query.edit_message_text(
-                "📭 Hozircha kanallar yo‘q."
-            )
-            return
-
-        keyboard = []
-
-        for channel in channels:
+        if uid != OWNER_ID:
 
             keyboard.append([
                 InlineKeyboardButton(
-                    f"✏️ {channel['title']} — {channel['reward']} ⭐",
-                    callback_data=f"editchannel:{channel['id']}",
+                    f"❌ O‘chirish {uid}",
+                    callback_data=f"adminremove:{uid}"
                 )
             ])
 
+    keyboard.append([
+        InlineKeyboardButton(
+            "➕ Admin qo‘shish",
+            callback_data="adminadd"
+        )
+    ])
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+# ============================================================
+# ADMIN ADD
+# ============================================================
+
+async def admin_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    context.user_data["state"] = "add_admin"
+
+    await query.edit_message_text(
+        "➕ Yangi adminning Telegram ID'sini yuboring.\n\n"
+        "Masalan:\n"
+        "123456789"
+    )
+
+
+async def admin_remove_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    target_id = int(query.data.split(":")[1])
+
+    if target_id == OWNER_ID:
+
+        await query.answer(
+            "❌ Ownerni o‘chirib bo‘lmaydi.",
+            show_alert=True
+        )
+
+        return
+
+    remove_admin(target_id)
+
+    await query.edit_message_text(
+        f"✅ {target_id} adminlardan olib tashlandi."
+    )
+
+
+# ============================================================
+# TASK CHANNELS
+# ============================================================
+
+async def task_channels_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    rows = conn.execute(
+        "SELECT * FROM channels ORDER BY id"
+    ).fetchall()
+
+    conn.close()
+
+    text = "📢 Topshiriq kanallari\n\n"
+
+    keyboard = []
+
+    for row in rows:
+
+        text += (
+            f"#{row['id']} "
+            f"{row['title']} — "
+            f"{row['reward']} ⭐\n"
+            f"{row['channel_id']}\n\n"
+        )
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"🗑 O‘chirish #{row['id']}",
+                callback_data=f"taskchanneldelete:{row['id']}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "➕ Kanal qo‘shish",
+            callback_data="taskchanneladd"
+        )
+    ])
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def task_channel_add(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    context.user_data["state"] = "add_task_channel_username"
+
+    await query.edit_message_text(
+        "➕ Kanal username'ini yuboring.\n\n"
+        "Masalan:\n"
+        "@mychannel"
+    )
+
+
+async def task_channel_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    channel_id = int(
+        query.data.split(":")[1]
+    )
+
+    conn = db()
+
+    conn.execute(
+        "DELETE FROM channels WHERE id=?",
+        (channel_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await query.edit_message_text(
+        "✅ Topshiriq kanali o‘chirildi."
+    )
+
+
+# ============================================================
+# MAJBURIY KANALLAR
+# ============================================================
+
+async def mandatory_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    rows = conn.execute(
+        "SELECT * FROM mandatory_channels ORDER BY id"
+    ).fetchall()
+
+    conn.close()
+
+    text = "📌 Majburiy kanallar\n\n"
+
+    if not rows:
+        text += "Hozircha majburiy kanal yo‘q.\n"
+
+    keyboard = []
+
+    for row in rows:
+
+        text += (
+            f"#{row['id']} "
+            f"{row['title']}\n"
+            f"{row['channel_id']}\n\n"
+        )
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"✏️ Almashtirish #{row['id']}",
+                callback_data=f"mandatoryedit:{row['id']}"
+            ),
+            InlineKeyboardButton(
+                f"🗑 O‘chirish #{row['id']}",
+                callback_data=f"mandatorydelete:{row['id']}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "➕ Majburiy kanal qo‘shish",
+            callback_data="mandatoryadd"
+        )
+    ])
+
+    await update.message.reply_text(
+        text,
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def mandatory_add_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    context.user_data["state"] = "mandatory_add_channel"
+
+    await query.edit_message_text(
+        "📌 Majburiy kanal qo‘shish\n\n"
+        "Kanal username'ini yuboring.\n\n"
+        "Masalan:\n"
+        "@mychannel"
+    )
+
+
+async def mandatory_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    channel_id = int(query.data.split(":")[1])
+
+    context.user_data["state"] = "mandatory_edit_channel"
+    context.user_data["mandatory_id"] = channel_id
+
+    await query.edit_message_text(
+        "✏️ Yangi kanal username'ini yuboring."
+    )
+
+
+async def mandatory_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        return
+
+    channel_id = int(query.data.split(":")[1])
+
+    conn = db()
+
+    conn.execute(
+        "DELETE FROM mandatory_channels WHERE id=?",
+        (channel_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+    await query.edit_message_text(
+        "✅ Majburiy kanal o‘chirildi."
+    )
+
+
+# ============================================================
+# ADVERTISING
+# ============================================================
+
+async def advertiser(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    context.user_data["state"] = "advertiser"
+
+    await update.message.reply_text(
+        "📢 Reklama / Admin bilan aloqa\n\n"
+        "Reklamangiz yoki taklifingizni bitta xabarda yozing.\n\n"
+        "Masalan:\n"
+        "• Reklama narxi\n"
+        "• Kanal username\n"
+        "• Reklama turi",
+        reply_markup=ReplyKeyboardMarkup(
+            [["🔙 Orqaga"]],
+            resize_keyboard=True
+        )
+    )
+
+    log_activity(user, "ADVERTISER_OPEN")
+
+
+async def advertiser_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    rows = conn.execute("""
+        SELECT *
+        FROM advertiser_requests
+        ORDER BY id DESC
+        LIMIT 20
+    """).fetchall()
+
+    conn.close()
+
+    if not rows:
+
+        await update.message.reply_text(
+            "📣 Reklama so‘rovlari yo‘q.",
+            reply_markup=admin_menu()
+        )
+
+        return
+
+    text = "📣 Reklama so‘rovlari\n\n"
+
+    for row in rows:
+
+        text += (
+            f"#{row['id']} | {row['created_at']}\n"
+            f"👤 {row['user_id']} "
+            f"@{row['username'] or '-'}\n"
+            f"📩 {row['message']}\n"
+            f"📌 {row['status']}\n\n"
+        )
+
+    await update.message.reply_text(
+        text[:4000],
+        reply_markup=admin_menu()
+    )
+
+
+# ============================================================
+# GIFT REQUESTS ADMIN
+# ============================================================
+
+async def gift_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not is_admin(user.id):
+        return
+
+    conn = db()
+
+    rows = conn.execute("""
+        SELECT *
+        FROM gift_requests
+        ORDER BY id DESC
+        LIMIT 20
+    """).fetchall()
+
+    conn.close()
+
+    if not rows:
+
+        await update.message.reply_text(
+            "🎁 Buyurtmalar yo‘q.",
+            reply_markup=admin_menu()
+        )
+
+        return
+
+    text = "🎁 Gift so‘rovlari\n\n"
+
+    for row in rows:
+
+        text += (
+            f"#{row['id']}\n"
+            f"👤 {row['user_id']}\n"
+            f"⭐ {row['price']}\n"
+            f"📌 {row['status']}\n\n"
+        )
+
+    await update.message.reply_text(
+        text,
+        reply_markup=admin_menu()
+    )
+
+
+# ============================================================
+# MANDATORY CHECK
+# ============================================================
+
+async def check_mandatory(user_id, context):
+
+    conn = db()
+
+    rows = conn.execute(
+        "SELECT * FROM mandatory_channels"
+    ).fetchall()
+
+    conn.close()
+
+    missing = []
+
+    for row in rows:
+
+        try:
+
+            member = await context.bot.get_chat_member(
+                row["channel_id"],
+                user_id
+            )
+
+            if member.status not in (
+                "member",
+                "administrator",
+                "creator"
+            ):
+                missing.append(row)
+
+        except:
+
+            missing.append(row)
+
+    return missing
+
+
+# ============================================================
+# TEXT ROUTER
+# ============================================================
+
+async def text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+    text = update.message.text
+
+    state = context.user_data.get("state")
+
+    # --------------------------------------------------------
+    # ORQAGA
+    # --------------------------------------------------------
+
+    if text == "🔙 Orqaga":
+
+        context.user_data.clear()
+
+        await update.message.reply_text(
+            "🏠 Bosh menyu",
+            reply_markup=user_menu(user.id)
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # ADMIN STATE
+    # --------------------------------------------------------
+
+    if is_admin(user.id):
+
+        if state == "add_admin":
+
+            try:
+
+                target_id = int(text)
+
+                add_admin(target_id)
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    f"✅ {target_id} admin qilindi.",
+                    reply_markup=admin_menu()
+                )
+
+                await notify_admins(
+                    context,
+                    f"👑 Yangi admin qo‘shildi:\n{target_id}"
+                )
+
+            except:
+
+                await update.message.reply_text(
+                    "❌ Telegram ID noto‘g‘ri."
+                )
+
+            return
+
+        # ----------------------------------------------------
+        # TASK CHANNEL ADD
+        # ----------------------------------------------------
+
+        if state == "add_task_channel_username":
+
+            context.user_data["new_channel"] = text
+            context.user_data["state"] = "add_task_channel_title"
+
+            await update.message.reply_text(
+                "Kanal nomini yuboring."
+            )
+
+            return
+
+        if state == "add_task_channel_title":
+
+            context.user_data["new_title"] = text
+            context.user_data["state"] = "add_task_channel_reward"
+
+            await update.message.reply_text(
+                f"Mukofot miqdorini yuboring.\n"
+                f"Masalan: {DEFAULT_TASK_REWARD}"
+            )
+
+            return
+
+        if state == "add_task_channel_reward":
+
+            try:
+
+                reward = float(text.replace(",", "."))
+
+                channel = context.user_data["new_channel"]
+                title = context.user_data["new_title"]
+
+                conn = db()
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO channels
+                    (channel_id, title, reward, created_at)
+                    VALUES (?, ?, ?, ?)
+                """, (
+                    channel,
+                    title,
+                    reward,
+                    datetime.now().isoformat()
+                ))
+
+                conn.commit()
+                conn.close()
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    "✅ Topshiriq kanali qo‘shildi.",
+                    reply_markup=admin_menu()
+                )
+
+            except Exception as e:
+
+                await update.message.reply_text(
+                    f"❌ Xato: {e}"
+                )
+
+            return
+
+        # ----------------------------------------------------
+        # MANDATORY CHANNEL ADD
+        # ----------------------------------------------------
+
+        if state == "mandatory_add_channel":
+
+            channel = text.strip()
+
+            context.user_data["mandatory_channel"] = channel
+            context.user_data["state"] = "mandatory_add_title"
+
+            await update.message.reply_text(
+                "Kanal nomini yuboring."
+            )
+
+            return
+
+        if state == "mandatory_add_title":
+
+            channel = context.user_data["mandatory_channel"]
+            title = text.strip()
+
+            conn = db()
+
+            try:
+
+                conn.execute("""
+                    INSERT INTO mandatory_channels
+                    (channel_id, title, created_at)
+                    VALUES (?, ?, ?)
+                """, (
+                    channel,
+                    title,
+                    datetime.now().isoformat()
+                ))
+
+                conn.commit()
+
+                context.user_data.clear()
+
+                await update.message.reply_text(
+                    "✅ Majburiy kanal qo‘shildi.",
+                    reply_markup=admin_menu()
+                )
+
+            except sqlite3.IntegrityError:
+
+                await update.message.reply_text(
+                    "❌ Bu kanal allaqachon mavjud."
+                )
+
+            finally:
+
+                conn.close()
+
+            return
+
+        # ----------------------------------------------------
+        # MANDATORY CHANNEL EDIT
+        # ----------------------------------------------------
+
+        if state == "mandatory_edit_channel":
+
+            channel_id = context.user_data["mandatory_id"]
+
+            conn = db()
+
+            conn.execute("""
+                UPDATE mandatory_channels
+                SET channel_id=?
+                WHERE id=?
+            """, (
+                text.strip(),
+                channel_id
+            ))
+
+            conn.commit()
+            conn.close()
+
+            context.user_data.clear()
+
+            await update.message.reply_text(
+                "✅ Majburiy kanal almashtirildi.",
+                reply_markup=admin_menu()
+            )
+
+            return
+
+    # --------------------------------------------------------
+    # ADVERTISER
+    # --------------------------------------------------------
+
+    if state == "advertiser":
+
+        conn = db()
+
+        cur = conn.execute("""
+            INSERT INTO advertiser_requests
+            (user_id, username, message, status, created_at)
+            VALUES (?, ?, ?, 'new', ?)
+        """, (
+            user.id,
+            user.username or "",
+            text,
+            datetime.now().isoformat()
+        ))
+
+        request_id = cur.lastrowid
+
+        conn.commit()
+        conn.close()
+
+        context.user_data.clear()
+
+        log_activity(
+            user,
+            "ADVERTISER_MESSAGE",
+            f"request={request_id}"
+        )
+
+        await update.message.reply_text(
+            "✅ Xabaringiz adminlarga yuborildi.\n\n"
+            "Admin siz bilan bog‘lanadi.",
+            reply_markup=user_menu(user.id)
+        )
+
+        await notify_admins(
+            context,
+            f"📢 Yangi reklama so‘rovi!\n\n"
+            f"🆔 #{request_id}\n"
+            f"👤 {user.first_name}\n"
+            f"Telegram ID: {user.id}\n"
+            f"Username: @{user.username or '-'}\n\n"
+            f"📩 Xabar:\n{text}"
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # USER MENU
+    # --------------------------------------------------------
+
+    if text == "⭐ Stars ishlash":
+
+        await stars_menu(update, context)
+
+    elif text == "👥 Referal":
+
+        await referral(update, context)
+
+    elif text == "📊 Statistika":
+
+        await statistics(update, context)
+
+    elif text == "💳 Gift olish":
+
+        await gift_menu(update, context)
+
+    elif text == "ℹ️ Qoidalar":
+
+        await rules(update, context)
+
+    elif text == "📢 Reklama":
+
+        await advertiser(update, context)
+
+    elif text == "👑 Admin panel":
+
+        await admin_panel(update, context)
+
+    # --------------------------------------------------------
+    # ADMIN MENU
+    # --------------------------------------------------------
+
+    elif text == "📊 Bot statistikasi":
+
+        await bot_statistics(update, context)
+
+    elif text == "👥 Foydalanuvchilar":
+
+        await users_statistics(update, context)
+
+    elif text == "📜 Faoliyat loglari":
+
+        await activity_logs(update, context)
+
+    elif text == "👑 Adminlar":
+
+        await admins_menu(update, context)
+
+    elif text == "📌 Majburiy kanallar":
+
+        await mandatory_menu(update, context)
+
+    elif text == "📢 Topshiriq kanallari":
+
+        await task_channels_menu(update, context)
+
+    elif text == "🎁 Gift so‘rovlari":
+
+        await gift_requests(update, context)
+
+    elif text == "📣 Reklama so‘rovlari":
+
+        await advertiser_requests(update, context)
+
+    else:
+
+        await update.message.reply_text(
+            "Menyudan foydalaning:",
+            reply_markup=user_menu(user.id)
+        )
+
+
+# ============================================================
+# CALLBACK ROUTER
+# ============================================================
+
+async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    query = update.callback_query
+
+    data = query.data
+
+    # --------------------------------------------------------
+    # BACK MAIN
+    # --------------------------------------------------------
+
+    if data == "back:main":
+
+        await query.answer()
+
+        await query.message.delete()
+
+        await context.bot.send_message(
+            query.from_user.id,
+            "🏠 Bosh menyu",
+            reply_markup=user_menu(query.from_user.id)
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # BACK STARS
+    # --------------------------------------------------------
+
+    if data == "back:stars":
+
+        await query.answer()
+
+        user = query.from_user
+
+        conn = db()
+
+        channels = conn.execute(
+            "SELECT * FROM channels ORDER BY id"
+        ).fetchall()
+
+        completed = conn.execute("""
+            SELECT task_id
+            FROM completed_tasks
+            WHERE user_id=?
+        """, (
+            user.id,
+        )).fetchall()
+
+        conn.close()
+
+        completed_ids = {
+            r["task_id"]
+            for r in completed
+        }
+
+        keyboard = []
+
+        for ch in channels:
+
+            status = (
+                "✅"
+                if ch["id"] in completed_ids
+                else f"⭐ +{ch['reward']}"
+            )
+
             keyboard.append([
                 InlineKeyboardButton(
-                    f"🗑 O‘chirish: {channel['channel_id']}",
-                    callback_data=f"deletechannel:{channel['id']}",
+                    f"{status} {ch['title']}",
+                    callback_data=f"task:{ch['id']}"
                 )
             ])
 
         keyboard.append([
             InlineKeyboardButton(
-                "➕ Kanal qo‘shish",
-                callback_data="adminchannel:add",
+                "🔙 Orqaga",
+                callback_data="back:main"
             )
         ])
 
-        text = "📋 Kanallar:\n\n"
-
-        for channel in channels:
-            text += (
-                f"#{channel['id']} "
-                f"{channel['title']}\n"
-                f"🔗 {channel['channel_id']}\n"
-                f"⭐ Mukofot: {channel['reward']}\n\n"
-            )
-
         await query.edit_message_text(
-            text,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-
-# =========================================================
-# CHANNEL TEXT INPUT
-# =========================================================
-
-async def channel_admin_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    step = context.user_data.get("channel_add_step")
-
-    if not step:
-        return
-
-    text = update.message.text.strip()
-
-    # -----------------------------------------------------
-    # 1. CHANNEL USERNAME
-    # -----------------------------------------------------
-
-    if step == "channel_id":
-
-        if not text.startswith("@"):
-
-            await update.message.reply_text(
-                "❌ Kanal username @ bilan boshlanishi kerak.\n\n"
-                "Masalan: @YangiKanal"
-            )
-            return
-
-        conn = get_db()
-        cur = conn.cursor()
-
-        cur.execute(
-            """
-            SELECT id
-            FROM channels
-            WHERE channel_id = ?
-            """,
-            (text,),
-        )
-
-        exists = cur.fetchone()
-
-        conn.close()
-
-        if exists:
-
-            await update.message.reply_text(
-                "❌ Bu kanal allaqachon qo‘shilgan."
-            )
-            return
-
-        # Kanalni tekshirish
-        try:
-
-            chat = await context.bot.get_chat(text)
-
-            if chat.type not in ["channel", "supergroup"]:
-
-                await update.message.reply_text(
-                    "❌ Bu username kanalga tegishli emas."
-                )
-                return
-
-        except Exception as e:
-
-            await update.message.reply_text(
-                "❌ Kanalni topib bo‘lmadi.\n\n"
-                "Username to‘g‘ri ekanini tekshiring.\n"
-                "Masalan: @YangiKanal"
-            )
-
-            print("New channel check error:", e)
-            return
-
-        context.user_data["new_channel_id"] = text
-
-        context.user_data["channel_add_step"] = "title"
-
-        await update.message.reply_text(
-            "✅ Kanal topildi.\n\n"
-            "2️⃣ Kanal nomini yuboring.\n\n"
-            "Masalan:\n"
-            "📢 Yangi kanal"
+            "⭐ Stars ishlash",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
         return
 
-    # -----------------------------------------------------
-    # 2. TITLE
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    # TASK
+    # --------------------------------------------------------
 
-    if step == "title":
+    if data.startswith("task:"):
 
-        context.user_data["new_channel_title"] = text
-
-        context.user_data["channel_add_step"] = "reward"
-
-        await update.message.reply_text(
-            "3️⃣ Mukofot miqdorini yuboring.\n\n"
-            "Masalan:\n"
-            "15"
-        )
+        await task_callback(update, context)
 
         return
 
-    # -----------------------------------------------------
-    # 3. REWARD
-    # -----------------------------------------------------
+    if data.startswith("check:"):
 
-    if step == "reward":
-
-        try:
-            reward = int(text)
-        except ValueError:
-
-            await update.message.reply_text(
-                "❌ Faqat raqam kiriting.\n\n"
-                "Masalan: 15"
-            )
-            return
-
-        if reward <= 0:
-
-            await update.message.reply_text(
-                "❌ Mukofot 0 dan katta bo‘lishi kerak."
-            )
-            return
-
-        channel_id = context.user_data.get("new_channel_id")
-        title = context.user_data.get("new_channel_title")
-
-        conn = get_db()
-        cur = conn.cursor()
-
-        try:
-
-            cur.execute(
-                """
-                INSERT INTO channels
-                (channel_id, title, reward, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    channel_id,
-                    title,
-                    reward,
-                    datetime.now().isoformat(),
-                ),
-            )
-
-            conn.commit()
-
-        except sqlite3.IntegrityError:
-
-            conn.rollback()
-            conn.close()
-
-            await update.message.reply_text(
-                "❌ Bu kanal allaqachon mavjud."
-            )
-
-            context.user_data.clear()
-            return
-
-        conn.close()
-
-        context.user_data.clear()
-
-        await update.message.reply_text(
-            f"✅ Kanal muvaffaqiyatli qo‘shildi!\n\n"
-            f"📢 {title}\n"
-            f"🔗 {channel_id}\n"
-            f"⭐ Mukofot: {reward}\n\n"
-            f"⚠️ Endi botni shu kanalga ADMIN qilib qo‘ying."
-        )
+        await check_task(update, context)
 
         return
 
+    # --------------------------------------------------------
+    # GIFT
+    # --------------------------------------------------------
 
-# =========================================================
-# EDIT CHANNEL
-# =========================================================
+    if data.startswith("gift:"):
 
-async def edit_channel_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+        await gift_callback(update, context)
 
-    query = update.callback_query
+        return
 
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
+    if data.startswith("confirmgift:"):
+
+        await confirm_gift(update, context)
+
+        return
+
+    # --------------------------------------------------------
+    # ADMIN ADD
+    # --------------------------------------------------------
+
+    if data == "adminadd":
+
+        await admin_add_callback(update, context)
+
+        return
+
+    if data.startswith("adminremove:"):
+
+        await admin_remove_callback(update, context)
+
+        return
+
+    # --------------------------------------------------------
+    # TASK CHANNEL
+    # --------------------------------------------------------
+
+    if data == "taskchanneladd":
+
+        await task_channel_add(update, context)
+
+        return
+
+    if data.startswith("taskchanneldelete:"):
+
+        await task_channel_delete(update, context)
+
+        return
+
+    # --------------------------------------------------------
+    # MANDATORY
+    # --------------------------------------------------------
+
+    if data == "mandatoryadd":
+
+        await mandatory_add_callback(update, context)
+
+        return
+
+    if data.startswith("mandatoryedit:"):
+
+        await mandatory_edit_callback(update, context)
+
+        return
+
+    if data.startswith("mandatorydelete:"):
+
+        await mandatory_delete_callback(update, context)
+
         return
 
     await query.answer()
 
-    channel_id = int(query.data.split(":")[1])
 
-    conn = get_db()
-    cur = conn.cursor()
+# ============================================================
+# ERROR HANDLER
+# ============================================================
 
-    cur.execute(
-        """
-        SELECT *
-        FROM channels
-        WHERE id = ?
-        """,
-        (channel_id,),
-    )
+async def error_handler(update, context):
 
-    channel = cur.fetchone()
-    conn.close()
-
-    if not channel:
-
-        await query.edit_message_text(
-            "❌ Kanal topilmadi."
-        )
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "⭐ Mukofotni o‘zgartirish",
-                callback_data=f"editreward:{channel_id}",
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🗑 Kanalni o‘chirish",
-                callback_data=f"deletechannel:{channel_id}",
-            )
-        ],
-    ]
-
-    await query.edit_message_text(
-        f"📢 {channel['title']}\n\n"
-        f"🔗 {channel['channel_id']}\n"
-        f"⭐ Hozirgi mukofot: {channel['reward']}",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+    logger.error(
+        "Exception while handling update:",
+        exc_info=context.error
     )
 
 
-# =========================================================
-# EDIT REWARD
-# =========================================================
-
-async def edit_reward_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
-        return
-
-    await query.answer()
-
-    channel_id = int(query.data.split(":")[1])
-
-    context.user_data["edit_reward_channel"] = channel_id
-
-    await query.edit_message_text(
-        "⭐ Yangi mukofot miqdorini yuboring.\n\n"
-        "Masalan: 20"
-    )
-
-
-# =========================================================
-# DELETE CHANNEL
-# =========================================================
-
-async def delete_channel_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
-        return
-
-    await query.answer()
-
-    channel_id = int(query.data.split(":")[1])
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT *
-        FROM channels
-        WHERE id = ?
-        """,
-        (channel_id,),
-    )
-
-    channel = cur.fetchone()
-
-    if not channel:
-
-        conn.close()
-
-        await query.edit_message_text(
-            "❌ Kanal topilmadi."
-        )
-        return
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "✅ Ha, o‘chirish",
-                callback_data=f"confirmdelete:{channel_id}",
-            ),
-            InlineKeyboardButton(
-                "❌ Yo‘q",
-                callback_data=f"editchannel:{channel_id}",
-            ),
-        ]
-    ]
-
-    conn.close()
-
-    await query.edit_message_text(
-        f"⚠️ Shu kanalni o‘chirmoqchimisiz?\n\n"
-        f"📢 {channel['title']}\n"
-        f"🔗 {channel['channel_id']}",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-# =========================================================
-# CONFIRM DELETE
-# =========================================================
-
-async def confirm_delete_callback(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    query = update.callback_query
-
-    if query.from_user.id != ADMIN_ID:
-        await query.answer("❌ Adminlar uchun.", show_alert=True)
-        return
-
-    await query.answer()
-
-    channel_id = int(query.data.split(":")[1])
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        DELETE FROM channels
-        WHERE id = ?
-        """,
-        (channel_id,),
-    )
-
-    conn.commit()
-    conn.close()
-
-    await query.edit_message_text(
-        "🗑 Kanal o‘chirildi."
-    )
-
-
-# =========================================================
-# EDIT REWARD TEXT
-# =========================================================
-
-async def edit_reward_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if update.effective_user.id != ADMIN_ID:
-        return
-
-    channel_id = context.user_data.get("edit_reward_channel")
-
-    if not channel_id:
-        return
-
-    try:
-        reward = int(update.message.text.strip())
-    except ValueError:
-
-        await update.message.reply_text(
-            "❌ Faqat raqam kiriting.\n\n"
-            "Masalan: 20"
-        )
-        return
-
-    if reward <= 0:
-
-        await update.message.reply_text(
-            "❌ Mukofot 0 dan katta bo‘lishi kerak."
-        )
-        return
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        UPDATE channels
-        SET reward = ?
-        WHERE id = ?
-        """,
-        (
-            reward,
-            channel_id,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
-
-    context.user_data.pop("edit_reward_channel", None)
-
-    await update.message.reply_text(
-        f"✅ Mukofot o‘zgartirildi.\n\n"
-        f"⭐ Yangi mukofot: {reward}"
-    )
-
-
-# =========================================================
-# UNKNOWN / TEXT ROUTER
-# =========================================================
-
-async def text_router(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-
-    if update.effective_user.id == ADMIN_ID:
-
-        # Mukofotni o'zgartirish
-        if context.user_data.get("edit_reward_channel"):
-            await edit_reward_text(update, context)
-            return
-
-        # Yangi kanal qo'shish
-        if context.user_data.get("channel_add_step"):
-            await channel_admin_text(update, context)
-            return
-
-    text = update.message.text
-
-    if text == "⭐ Stars ishlash":
-        await stars_work(update, context)
-
-    elif text == "👥 Referal":
-        await referral(update, context)
-
-    elif text == "📊 Statistika":
-        await statistics(update, context)
-
-    elif text == "💳 Gift olish":
-        await gift_menu(update, context)
-
-    elif text == "ℹ️ Qoidalar":
-        await rules(update, context)
-
-    elif text == "🎁 So‘rovlar":
-        await requests(update, context)
-
-    elif text == "⭐ Bot Stars":
-        await bot_stars(update, context)
-
-    elif text == "📢 Kanallar":
-        await channel_admin_menu(update, context)
-
-
-# =========================================================
+# ============================================================
 # MAIN
-# =========================================================
+# ============================================================
 
 def main():
 
     init_db()
+
+    print("=" * 50)
+    print("FROSTSTARS BOT IS STARTING...")
+    print("=" * 50)
 
     application = (
         Application.builder()
@@ -2057,96 +2309,26 @@ def main():
         CommandHandler("start", start)
     )
 
-    # Task
+    # Callback
     application.add_handler(
-        CallbackQueryHandler(
-            task_callback,
-            pattern=r"^task:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            check_task_callback,
-            pattern=r"^checktask:"
-        )
-    )
-
-    # Gifts
-    application.add_handler(
-        CallbackQueryHandler(
-            real_gift_callback,
-            pattern=r"^realgift:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            confirm_gift_callback,
-            pattern=r"^confirmgift:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            cancel_gift_callback,
-            pattern=r"^cancelgift$"
-        )
-    )
-
-    # Gift requests
-    application.add_handler(
-        CallbackQueryHandler(
-            request_callback,
-            pattern=r"^(approve|reject|delivered|rejectapproved):"
-        )
-    )
-
-    # Channel management
-    application.add_handler(
-        CallbackQueryHandler(
-            channel_admin_callback,
-            pattern=r"^adminchannel:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            edit_channel_callback,
-            pattern=r"^editchannel:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            edit_reward_callback,
-            pattern=r"^editreward:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            delete_channel_callback,
-            pattern=r"^deletechannel:"
-        )
-    )
-
-    application.add_handler(
-        CallbackQueryHandler(
-            confirm_delete_callback,
-            pattern=r"^confirmdelete:"
-        )
+        CallbackQueryHandler(callback_router)
     )
 
     # Text
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            text_router,
+            text_router
         )
     )
 
-    print("🤖 FrostStars bot ishga tushdi...")
+    application.add_error_handler(
+        error_handler
+    )
+
+    print("BOT IS RUNNING...")
+    print("Token: loaded")
+    print()
 
     application.run_polling(
         drop_pending_updates=True
