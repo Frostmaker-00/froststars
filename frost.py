@@ -2803,22 +2803,13 @@ async def error_handler(update, context):
 # MAIN
 # ============================================================
 
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
-    print("=" * 55)
-    print("🇺🇿 FROSTSTARS TELEGRAM BOT")
-    print("=" * 55)
-    print("BOT_TOKEN: loaded")
-    print("Database: ready")
-    print("Starting polling...")
-    print("=" * 55)
 
-    init_db()
-
-    application = (
-        Application.builder()
-        .token(TOKEN)
-        .build()
-    )
+    application = Application.builder().token(TOKEN).build()
 
     # /start
     application.add_handler(
@@ -2850,6 +2841,7 @@ def main():
 
     print("✅ FROSTSTARS BOT IS RUNNING!")
 
+    # BOTNI DOIMIY ISHLATIB TURADI
     application.run_polling(
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
