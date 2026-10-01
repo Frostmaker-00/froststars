@@ -2808,6 +2808,8 @@ async def error_handler(update, context):
 # ============================================================
 
 def main():
+    # DATABASE JADVALLARINI YARATISH
+    init_db()
 
     application = Application.builder().token(TOKEN).build()
 
